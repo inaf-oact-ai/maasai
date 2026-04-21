@@ -193,26 +193,47 @@ def run_graph(
 	
 	# - Get response
 	if "__interrupt__" in result:
+		logger.info("Interrupt in result ...")
 		payload = result["__interrupt__"][0].value
 		print_interrupt(payload)
 		resume = {
 			"decision": "approve",
 			"feedback": None,
 		}
+		logger.info("Invoke graph with resume ...")
 		result = graph.invoke(Command(resume=resume), config=config)
 
 	final = result.get("final_answer")
+	print("final")
+	print(final)
 	if final is None:
 		logger.warning("No final answer produced.")
 		return
 
 	print("\n=== FINAL ANSWER ===")
-	print(final.answer)
-	if final.caveats:
-		print("\nCaveats:")
-		for item in final.caveats:
-			print(f"- {item}") 
+	print(f"Status: {final.status}")
+	print(f"Message: {final.message}")
+
+	if final.answer:
+		print("\nAnswer:")
+		print(final.answer)
+
+	if final.citations:
+		print("\nCitations:")
+		for item in final.citations:
+			print(f"- {item}")
+
+	if final.artifacts:
+		print("\nArtifacts:")
+		for item in final.artifacts:
+			print(f"- {item}")
+
+	if final.debug:
+		print("\nDebug:")
+		print(final.debug)
 			
+	
+	
 	
 
 def run_cli(graph, args):

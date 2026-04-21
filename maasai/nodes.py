@@ -16,8 +16,10 @@ from .agents import AgentFactory
 from .config import Settings
 from .guardrails import detect_pii, is_probably_english, is_scientific_or_astronomy_related, wrap_guardrail_response
 from .rag import PromptRAG
+from .schemas import FinalAnswer
 #from .schemas import ApprovalDecision, DomainDecision, FinalAnswer, OptimizedPrompt, PlanStep, PromptAssessment, StepResult, TaskPlan
 from .state import GraphState
+from maasai import logger
 
 ##################################################
 ###          HELPER METHODS
@@ -97,6 +99,7 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	""" User input triage operations """
 	messages = state.get("messages", [])
 	raw_user_text = _extract_text(messages)
+	logger.info(f"--> intake_triage(): raw_user_text={raw_user_text}")
 
 	# 1. detect files / image paths from state
 	# state may include e.g. input_files, image_paths, attachments
@@ -108,27 +111,66 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		prepared_assets.append(
 			_prepare_asset(item, ctx)
 		)
+		
+	logger.info("--> intake_triage(): prepared_assets")
+	print("prepared_assets")
+	print(prepared_assets)
 
 	# 3. cheap deterministic checks first
-	language_ok = True if not ctx.settings.workflow.strict_english_only else is_probably_english(raw_user_text)
+	#language_ok = True if not ctx.settings.workflow.strict_english_only else is_probably_english(raw_user_text)
+	language_precheck_ok = (
+		True if not ctx.settings.workflow.strict_english_only
+		else is_probably_english(raw_user_text)
+	)
+
+	logger.info("--> intake_triage(): language_precheck_ok")
+	print("language_precheck_ok")
+	print(language_precheck_ok)
+	
 	pii_reasons = detect_pii(raw_user_text)
-	pii_detected = bool(pii_reasons)
+	logger.info("--> intake_triage(): detect_pii")
+	print("pii_reasons")
+	print(pii_reasons)
+	
+	#pii_detected = bool(pii_reasons)
+	pii_precheck_detected = bool(pii_reasons)
 
 	# 4. domain/scope decision from text + prepared image summaries
 	intake_prompt = _build_intake_prompt(
 		text=raw_user_text,
 		prepared_assets=prepared_assets
 	)
+	
+	logger.info("--> intake_triage(): intake_prompt")
+	print("intake_prompt")
+	print(intake_prompt)
 
+	logger.info("--> intake_triage(): Invoking intake_agent on prompt ...")
 	decision = ctx.agents.intake_agent.invoke({
 		"messages": [HumanMessage(content=intake_prompt)]
 	})["structured_response"]
+
+	print("decision")
+	print(decision)
+	
+	language_model_ok= getattr(decision, "language_ok", None)
+	pii_model_detected= getattr(decision, "pii_detected", None)
+	language_ok= language_model_ok if language_model_ok is not None else language_precheck_ok
+	pii_detected= pii_model_detected if pii_model_detected is not None else pii_precheck_detected
 
 	accepted = (
 		language_ok
 		and (not pii_detected or ctx.settings.workflow.pii_policy != "block")
 		and decision.accepted
 	)
+	
+	print("accepted")
+	print(accepted)
+	
+	#print("strict_english_only")
+	#print(ctx.settings.workflow.strict_english_only)
+	#print("language_precheck_ok before return")
+	#print(language_precheck_ok)
 
 	if not accepted:
 		return {
@@ -136,20 +178,36 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 			"multimodal": len(prepared_assets) > 0,
 			"prepared_assets": prepared_assets,
 			"intake_decision": decision,
+			"language_precheck_ok": language_precheck_ok,
+			"language_model_ok": language_model_ok,
+			"language_ok": language_ok,
+			"pii_precheck_detected": pii_precheck_detected,
+			"pii_model_detected": pii_model_detected,
+			"pii_detected": pii_detected,
+			"domain_ok": getattr(decision, "domain_ok", None),
+			"intake_reason": getattr(decision, "reason", None),
 			"status": "blocked_intake",
 			"route_reason": wrap_guardrail_response(decision.reason),
 		}
-
+		
 	return {
 		"raw_user_text": raw_user_text,
 		"multimodal": len(prepared_assets) > 0,
 		"prepared_assets": prepared_assets,
 		"intake_decision": decision,
+		"language_precheck_ok": language_precheck_ok,
+		"language_model_ok": language_model_ok,
+		"language_ok": language_ok,
+		"pii_precheck_detected": pii_precheck_detected,
+		"pii_model_detected": pii_model_detected,
+		"pii_detected": pii_detected,
+		"domain_ok": getattr(decision, "domain_ok", None),
+		"intake_reason": getattr(decision, "reason", None),
 		"approval_iterations": state.get("approval_iterations", 0),
 		"max_approval_iterations": state.get("max_approval_iterations", ctx.settings.workflow.max_approval_iterations),
 		"status": "running",
 	}
-
+	
 
 def assess_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	assessment = ctx.agents.assessment_agent.invoke({
@@ -359,10 +417,75 @@ def assess_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 #	return {"final_answer": final}
 
 
+
 def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	_ = ctx
+
 	status = state.get("status")
-	if status in {"blocked_language", "blocked_pii", "blocked_domain", "rejected_after_iterations"}:
-		final = FinalAnswer(answer=state.get("route_reason", "Request rejected."), citations=[], caveats=[], confidence="low")
+
+	if status in {"blocked_language", "blocked_pii", "blocked_domain", "blocked_intake", "rejected_after_iterations"}:
+		language_precheck_ok = state.get("language_precheck_ok", True)
+		language_model_ok = state.get("language_model_ok", None)
+		language_ok= state.get("language_ok", None)
+		
+		pii_precheck_detected = state.get("pii_precheck_detected", False)
+		pii_model_detected = state.get("pii_model_detected", None)
+		pii_detected= state.get("pii_detected", None)
+		
+		domain_ok = state.get("domain_ok", True)
+		intake_reason = state.get("intake_reason")
+
+
+		reasons = []
+		if not language_ok:
+			reasons.append("it is not in English")
+		if pii_detected:
+			reasons.append("it appears to contain personally identifiable information")
+		if not domain_ok:
+			reasons.append("it is outside the supported astronomy and astrophysics domain")
+
+		if reasons:
+			if len(reasons) == 1:
+				user_message = f"The request was rejected because {reasons[0]}."
+			elif len(reasons) == 2:
+				user_message = f"The request was rejected because {reasons[0]} and {reasons[1]}."
+			else:
+				user_message = (
+					f"The request was rejected because {reasons[0]}, {reasons[1]}, "
+					f"and {reasons[2]}."
+				)
+		else:
+			user_message = state.get("route_reason", "The request was rejected.")
+
+		final = FinalAnswer(
+			status="rejected",
+			message=user_message,
+			answer=None,
+			citations=[],
+			artifacts=[],
+			debug={
+				"route_reason": state.get("route_reason"),
+				"language_precheck_ok": language_precheck_ok,
+				"language_model_ok": language_model_ok,
+				"language_ok": language_ok,
+				"pii_precheck_detected": pii_precheck_detected,
+				"pii_model_detected": pii_model_detected,
+				"pii_detected": pii_detected,
+				"domain_ok": domain_ok,
+				"intake_reason": intake_reason,
+			},
+		)
+		
+		print("--> guardrail final")
+		print(final)
 		return {"final_answer": final, "status": "done"}
-	return {"status": "done"}
+
+	final = FinalAnswer(
+		status="ok",
+		message="Request passed intake triage.",
+		answer="The request passed intake triage, but no downstream execution node is enabled in this test graph yet.",
+		citations=[],
+		artifacts=[],
+		debug={},
+	)
+	return {"final_answer": final, "status": "done"}

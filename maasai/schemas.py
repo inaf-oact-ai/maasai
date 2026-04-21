@@ -92,11 +92,11 @@ class IntakeDecision(BaseModel):
 #	metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-#class FinalResponse(BaseModel):
-#	status: Literal["ok", "rejected", "aborted", "error"]
-#	message: str
-#	answer: str | None = None
-#	citations: list[dict[str, Any]] = Field(default_factory=list)
-#	artifacts: list[dict[str, Any]] = Field(default_factory=list)
-#	debug: dict[str, Any] = Field(default_factory=dict)
+class FinalAnswer(BaseModel):
+	status: Literal["ok", "rejected", "aborted", "error"]
+	message: str
+	answer: str | None = None
+	citations: list[dict[str, Any]] = Field(default_factory=list)
+	artifacts: list[dict[str, Any]] = Field(default_factory=list)
+	debug: dict[str, Any] = Field(default_factory=dict)
 
