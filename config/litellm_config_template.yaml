@@ -1,0 +1,228 @@
+# MAASAI LiteLLM configuration
+# Notes:
+# - All local models are served by Ollama.
+# - Commercial models are OpenAI-hosted.
+# - `model_name` is the logical alias used by MAASAI.
+# - `litellm_params.model` is the actual upstream model identifier.
+# - Environment variables like ${OPENAI_API_KEY} should be expanded by your app
+#   when loading this YAML.
+
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  timeout: 120
+
+model_list:
+  # =========================================================
+  # LOCAL OLLAMA POOL
+  # =========================================================
+
+  # ---------- model-tiny (<= 4B) ----------
+  - model_name: model-tiny
+    litellm_params:
+      model: ollama_chat/qwen3.5:4b
+      api_base: http://server1:11434    
+      rpm: 120
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: low
+        cost_tier: local
+
+  - model_name: model-tiny
+    litellm_params:
+      model: ollama_chat/qwen3.5:4b
+      api_base: http://server2:11434    
+      rpm: 120
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: low
+        cost_tier: local
+          
+  - model_name: model-tiny
+    litellm_params:
+      model: ollama_chat/qwen3.5:4b
+      api_base: http://server3:11434  
+      rpm: 120
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: low
+        cost_tier: local
+
+  # ---------- model-small (> 4B and <= 9B) ----------
+  - model_name: model-small
+    litellm_params:
+      model: ollama_chat/qwen3.5:9b
+      api_base: http://server1:11434  
+      rpm: 80
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: medium
+        cost_tier: local
+
+  - model_name: model-small
+    litellm_params:
+      model: ollama_chat/qwen3.5:9b
+      api_base: http://server2:11434  
+      rpm: 80
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: medium
+        cost_tier: local
+
+  - model_name: model-small
+    litellm_params:
+      model: ollama_chat/qwen3.5:9b
+      api_base: http://server3:11434  
+      rpm: 80
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: medium
+        cost_tier: local
+
+  # ---------- model-medium (~ 20-30B) ----------
+  - model_name: model-medium
+    litellm_params:
+      model: ollama_chat/qwen3.5:27b
+      api_base: http://server4:11434  
+      rpm: 30
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: medium
+        cost_tier: local
+          
+  - model_name: model-medium
+    litellm_params:
+      model: ollama_chat/qwen3.5:27b
+      api_base: http://server5:11434  
+      rpm: 30
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: medium
+        cost_tier: local
+
+  # ---------- model-large (>= 90B) ----------
+  - model_name: model-large
+    litellm_params:
+      model: ollama_chat/qwen3.5:35b   
+      api_base: http://server6:11434  
+      rpm: 10
+    model_info:
+      metadata:
+        provider: ollama
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: high
+        cost_tier: local
+        note: "Replace with a >=90B Ollama-served model if available in your deployment"
+
+  # =========================================================
+  # COMMERCIAL POOL
+  # =========================================================
+
+  # ---------- model-commercial-mini ----------
+  - model_name: model-commercial-mini
+    litellm_params:
+      model: openai/gpt-5-mini
+      api_key: ${OPENAI_API_KEY}
+      rpm: 200
+    model_info:
+      metadata:
+        provider: openai
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: medium
+        cost_tier: commercial
+
+  # ---------- model-commercial ----------
+  - model_name: model-commercial
+    litellm_params:
+      model: openai/gpt-5
+      api_key: ${OPENAI_API_KEY}
+      rpm: 100
+    model_info:
+      metadata:
+        provider: openai
+        tool_calling: true
+        structured_output: true
+        reasoning_grade: high
+        cost_tier: commercial
+
+routing_policy:
+  default_alias: model-small
+
+  task_to_alias:
+    language_check: model-tiny
+    pii_check: model-tiny
+    domain_affinity: model-small
+    prompt_assessment: model-small
+    prompt_optimization: model-medium
+    approval_rewrite: model-medium
+    planner: model-large
+    supervisor: model-large
+    worker: model-medium
+    caesar_execution_support: model-medium
+    aggregation: model-large
+    final_guardrail: model-small
+    final_response: model-large
+
+  fallbacks:
+    planner:
+      - model-commercial
+    supervisor:
+      - model-commercial
+    aggregation:
+      - model-commercial
+    final_response:
+      - model-commercial
+    prompt_optimization:
+      - model-commercial-mini
+    worker:
+      - model-commercial-mini
+
+  capability_filters:
+    tool_required:
+      require_metadata:
+        tool_calling: true
+    structured_output_required:
+      require_metadata:
+        structured_output: true
+
+  provider_preferences:
+    prefer_local_for:
+      - language_check
+      - pii_check
+      - domain_affinity
+      - prompt_assessment
+      - prompt_optimization
+      - worker
+      - caesar_execution_support
+    allow_commercial_for:
+      - planner
+      - supervisor
+      - aggregation
+      - final_response
