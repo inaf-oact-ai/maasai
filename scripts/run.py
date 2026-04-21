@@ -172,7 +172,7 @@ def run_graph(
 	graph,
 	query: str, 
 	thread_id: str
-) -> str:
+) -> None:
 	"""Helper to run the agentic graph and return the final answer."""
 
 	# - Define config    
@@ -203,7 +203,7 @@ def run_graph(
 
 	final = result.get("final_answer")
 	if final is None:
-		logger.warn("No final answer produced.")
+		logger.warning("No final answer produced.")
 		return
 
 	print("\n=== FINAL ANSWER ===")
@@ -213,8 +213,7 @@ def run_graph(
 		for item in final.caveats:
 			print(f"- {item}") 
 			
-	return final.answer
-
+	
 
 def run_cli(graph, args):
 	""" Run graph in CLI mode for test purposes """
