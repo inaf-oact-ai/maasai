@@ -62,8 +62,8 @@ def get_args():
 	# - Input options
 	parser.add_argument('-config_litellm','--config_litellm', dest='config_litellm', required=True, type=str, help='Input yaml config file for LiteLLM') 
 	
-	# - Task options
-	parser.add_argument('-query','--query', dest='query', required=True, type=str, help='Input user query') 
+	# - Task options (MANDATORY ONLY IN CLI MODE)
+	parser.add_argument('-query','--query', dest='query', required=False, default=None, type=str, help='Input user query') 
 	
 	##### OPTIONAL #######
 	# - LLM options
@@ -218,8 +218,8 @@ def run_cli(graph, args):
 	""" Run graph in CLI mode for test purposes """
 
 	# - Check for user prompt
-	if not args.query:
-		print("Missing --query in cli mode")
+	if not args.query or args.query is None or args.query=="":
+		print("Missing --query or empty query in cli mode")
 		return 1
 
 	# - Run graph

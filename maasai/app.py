@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langgraph.types import Command
+from langchain_core.messages import HumanMessage
 
 # - MAASAI MODULES
 from maasai import logger
