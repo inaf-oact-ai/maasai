@@ -211,7 +211,9 @@ def run_graph(
 	if final.caveats:
 		print("\nCaveats:")
 		for item in final.caveats:
-			print(f"- {item}")    
+			print(f"- {item}") 
+			
+	return final.answer
 
 
 def run_cli(graph, args):
