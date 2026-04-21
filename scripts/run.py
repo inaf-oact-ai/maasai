@@ -31,6 +31,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command, interrupt
+from langgraph.checkpoint.memory import InMemorySaver, MemorySaver
 
 # - MAASAI MODULES
 from maasai.config import Settings
@@ -140,14 +141,29 @@ def main():
 	#===========================
 	#==   BUILD GRAPH
 	#===========================
-	logger.info("Creating agent graph ...")
+	# - Create settings
+	logger.info("Create settings ...")
 	settings= Settings()
+	
+	# - Create memory
+	logger.info("Creating graph memory ...")
+	ckp_saver = MemorySaver()
+	#ckp_saver = InMemorySaver()
+	
+	# - Build graph
+	logger.info("Creating agent graph ...")
+	
 	#graph= build_graph(settings)
 	graph= build_graph(
 		agents=agents,
 		prompt_rag=prompt_rag,
-		settings=settings
+		settings=settings,
+		ckp_saver=ckp_saver
 	)
+	
+	# - Visualize compiled graph
+	logger.info("Visualize graph ...")
+	print(graph.get_graph().draw_ascii())
 	
 	
 	#config = {"configurable": {"thread_id": "maasai-demo-thread"}}

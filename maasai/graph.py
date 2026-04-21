@@ -40,6 +40,8 @@ from .state import GraphState
 from .tools import AstronomyToolRegistry
 from .model_router import ModelRouter
 
+from maasai import logger
+
 ##################################################
 ###          HELPER METHODS
 ##################################################
@@ -95,7 +97,8 @@ def _after_approval(state: GraphState) -> str:
 def build_graph(
 	agents: AgentFactory,
 	prompt_rag: PromptRAG | None = None,
-	settings: Settings | None = None
+	settings: Settings | None = None,
+	ckp_saver: BaseCheckpointSaver = InMemorySaver(),
 ):
 	settings = settings or Settings()
 	ctx = NodeContext(
@@ -106,9 +109,11 @@ def build_graph(
 	""" Build agent graph """
 	
 	# - Create builder
+	logger.info("Creating builder ...")
 	builder = StateGraph(GraphState)
 
 	# - Create nodes
+	logger.info("Creating nodes ...")
 	builder.add_node("intake_triage", partial(intake_triage, ctx=ctx))
 	##builder.add_node("normalize_input", partial(normalize_input, ctx=ctx))
 	##builder.add_node("language_gate", partial(language_gate, ctx=ctx))
@@ -179,4 +184,6 @@ def build_graph(
 	
 	#builder.add_edge("final_guardrail", END)
 
-	return builder.compile(checkpointer=InMemorySaver())
+	# - Compile and return graph
+	logger.info("Compiling graph ...")
+	return builder.compile(checkpointer=ckp_saver)
