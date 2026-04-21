@@ -23,6 +23,7 @@ from .state import GraphState
 ###          HELPER METHODS
 ##################################################
 def _extract_text(messages: list[Any]) -> str:
+	""" Extract text from input messages """
 	chunks: list[str] = []
 	for message in messages:
 		content = getattr(message, "content", message)
@@ -34,6 +35,46 @@ def _extract_text(messages: list[Any]) -> str:
 					chunks.append(str(item.get("text", "")))
 	return "\n".join(part for part in chunks if part).strip()
 
+
+def _build_intake_prompt(
+	text: str,
+	prepared_assets: list[Any] | None = None,
+) -> str:
+	""" Create prompt for intake agent """
+	prepared_assets = prepared_assets or []
+
+	lines = [
+		"USER INPUT:",
+		text or "<empty>",
+	]
+
+	if prepared_assets:
+		lines.extend([
+			"",
+			"ATTACHMENTS:",
+		])
+		for idx, asset in enumerate(prepared_assets, start=1):
+			path = getattr(asset, "path", None) or asset.get("path", "")
+			kind = getattr(asset, "kind", None) or asset.get("kind", "unknown")
+			notes = getattr(asset, "notes", None) or asset.get("notes", [])
+
+			lines.append(f"- Asset {idx}:")
+			lines.append(f"  kind: {kind}")
+			lines.append(f"  path: {path}")
+			if notes:
+				lines.append(f"  notes: {notes}")
+	else:
+		lines.extend([
+			"",
+			"ATTACHMENTS: none",
+		])
+
+	lines.extend([
+		"",
+		"Provide your structured decision.",
+	])
+
+	return "\n".join(lines)
 
 ##################################################
 ###          GRAPH NODES
@@ -76,8 +117,7 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	# 4. domain/scope decision from text + prepared image summaries
 	intake_prompt = _build_intake_prompt(
 		text=raw_user_text,
-		prepared_assets=prepared_assets,
-		strict_english=ctx.settings.workflow.strict_english_only,
+		prepared_assets=prepared_assets
 	)
 
 	decision = ctx.agents.intake_agent.invoke({

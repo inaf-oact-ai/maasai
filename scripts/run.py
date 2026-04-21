@@ -58,13 +58,25 @@ def get_args():
 	"""This function parses and return arguments passed in"""
 	parser = argparse.ArgumentParser(description="Parse args.")
 
+	##### MANDATORY ######
 	# - Input options
 	parser.add_argument('-config_litellm','--config_litellm', dest='config_litellm', required=True, type=str, help='Input yaml config file for LiteLLM') 
 	
-	# - LLM settings
+	# - Task options
+	parser.add_argument('-query','--query', dest='query', required=True, type=str, help='Input user query') 
+	
+	##### OPTIONAL #######
+	# - LLM options
 	parser.add_argument('-temperature','--temperature', dest='temperature', required=False, type=float, default=0.0, help='Default temperature value') 
 	
+	# - RUN options
+	parser.add_argument("--mode", choices=["cli", "api"], default="cli")
+	parser.add_argument("--thread-id", type=str, default="maasai-demo-thread")
 	
+	# - API options
+	parser.add_argument("--host", type=str, default="127.0.0.1")
+	parser.add_argument("--port", type=int, default=8000)
+
 	args, _unknown = parser.parse_known_args()
 	
 	return args		
@@ -78,22 +90,12 @@ def print_interrupt(payload: dict) -> None:
 	print("=================\n")
 
 
-##############
-##   MAIN   ##
-##############
-def main():
-	"""Main function"""
-
-	#===========================
-	#==   PARSE ARGS
-	#===========================
-	logger.info("Parse and retrieve input script args ...")
-	try:
-		args= get_args()
-	except Exception as ex:
-		logger.error("Failed to get and parse options (err=%s)", str(ex))
-		return 1
-
+###########################
+##   AGENT GRAPH METHODS
+###########################
+def build_runtime(args):
+	""" Create agent graph """
+	
 	#===========================
 	#==   CREATE LLM ROUTER
 	#===========================
@@ -104,7 +106,7 @@ def main():
 			config = yaml.safe_load(f)
 	except Exception as e:
 		logger.error(f"Failed to load LiteLLM config file {args.config_litellm} (err={str(e)}, exit!")
-		return 1
+		return None
 
 	# - Create a LiteLLM Router with the model list from the config
 	logger.info(f"Creating a LiteLLM Router with model list parsed from config file {args.config_litellm} ...")
@@ -152,8 +154,6 @@ def main():
 	
 	# - Build graph
 	logger.info("Creating agent graph ...")
-	
-	#graph= build_graph(settings)
 	graph= build_graph(
 		agents=agents,
 		prompt_rag=prompt_rag,
@@ -165,40 +165,121 @@ def main():
 	logger.info("Visualize graph ...")
 	print(graph.get_graph().draw_ascii())
 	
+	return graph
+
+
+def run_graph(
+	graph,
+	query: str, 
+	thread_id: str
+) -> str:
+	"""Helper to run the agentic graph and return the final answer."""
+
+	# - Define config    
+	config = {"configurable": {"thread_id": thread_id}}
+
+	# - Define input message    
+	initial_state = {
+		"messages": [
+			HumanMessage(
+				content=query
+			)
+		]
+	}
+
+	# - Invoke graph
+	logger.info(f"Run user query: {query} ...")
+	result = graph.invoke(initial_state, config=config)
 	
-	#config = {"configurable": {"thread_id": "maasai-demo-thread"}}
+	# - Get response
+	if "__interrupt__" in result:
+		payload = result["__interrupt__"][0].value
+		print_interrupt(payload)
+		resume = {
+			"decision": "approve",
+			"feedback": None,
+		}
+		result = graph.invoke(Command(resume=resume), config=config)
 
-	#initial_state = {
-	#	"messages": [
-	#		HumanMessage(
-	#			content="Analyze a radio astronomy image of a candidate supernova remnant and suggest a minimal workflow."
-	#		)
-	#	]
-	#}
+	final = result.get("final_answer")
+	if final is None:
+		logger.warn("No final answer produced.")
+		return
 
-	#result = graph.invoke(initial_state, config=config)
-	#if "__interrupt__" in result:
-	#	payload = result["__interrupt__"][0].value
-	#	print_interrupt(payload)
-	#	resume = {
-	#		"decision": "approve",
-	#		"feedback": None,
-	#	}
-	#	result = graph.invoke(Command(resume=resume), config=config)
-
-	#final = result.get("final_answer")
-	#if final is None:
-	#	print("No final answer produced.")
-	#	return
-
-	#print("\n=== FINAL ANSWER ===")
-	#print(final.answer)
-	#if final.caveats:
-	#	print("\nCaveats:")
-	#	for item in final.caveats:
-	#		print(f"- {item}")
+	print("\n=== FINAL ANSWER ===")
+	print(final.answer)
+	if final.caveats:
+		print("\nCaveats:")
+		for item in final.caveats:
+			print(f"- {item}")    
 
 
+def run_cli(graph, args):
+	""" Run graph in CLI mode for test purposes """
+
+	# - Check for user prompt
+	if not args.query:
+		print("Missing --query in cli mode")
+		return 1
+
+	# - Run graph
+	logger.info(f"Run graph with user query: {args.query}")
+	return run_graph(
+		graph=graph,
+		query=args.query,
+		thread_id="maasai-thread"
+	)
+	
+###########################
+##   AGENT GRAPH APP
+###########################
+def run_api(graph, args):
+	import uvicorn
+	from maasai.app import create_fastapi_app
+	
+	# - Create app
+	logger.info("Creating app for agent graph ...")
+	app = create_fastapi_app(graph)
+	
+	# - Launch app
+	logger.info(f"Launching app on {args.host}:{args.port} ...")
+	uvicorn.run(app, host=args.host, port=args.port)
+	return 0
+	
+
+##############
+##   MAIN   ##
+##############
+def main():
+	"""Main function"""
+
+	#===========================
+	#==   PARSE ARGS
+	#===========================
+	logger.info("Parse and retrieve input script args ...")
+	try:
+		args= get_args()
+	except Exception as ex:
+		logger.error("Failed to get and parse options (err=%s)", str(ex))
+		return 1
+
+	
+	#===========================
+	#==   CREATE GRAPH
+	#===========================
+	logger.info("Creating agent graph ...")
+	graph= build_runtime(args)
+	
+	#===========================
+	#==   RUN
+	#===========================
+	if args.mode == "cli":
+		return run_cli(graph, args)
+	elif args.mode == "api":
+		return run_api(graph, args)
+	
+	
+	
 	return 0
 		
 ###################

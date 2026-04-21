@@ -45,7 +45,7 @@ class AgentFactory:
 				"- Accept only English requests about astronomy, astrophysics, scientific analysis, or astronomical data analysis. \n"
 				"- Reject if personal identifiable information (PII) is present. \n"
 				"- Reject if the provided input data (if any) do not belong to the astronomy domain, e.g. an image or a table with non-astronomical content. \n"
-				"Return a precise reason for acceptanc/rejection."
+				"Return a precise reason for acceptance/rejection."
 			),
 		)
 	
