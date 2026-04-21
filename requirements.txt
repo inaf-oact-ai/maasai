@@ -1,4 +1,5 @@
 numpy
+ipython
 pydantic
 mlflow
 langchain
@@ -8,5 +9,6 @@ langchain-core
 langchain-mcp-adapters
 langchain-openai
 langchain-text-splitters
+langchain_litellm
 langgraph
 litellm
