@@ -2,8 +2,7 @@
   <img src="share/Logo_MAASAI_noborder.png" alt="MAASAI logo" width="300"/>
 </p>
 
-# maasai
-Multi-Agent AI System for Astrodata Inference (MAASAI)
+# Multi-Agent AI System for Astrodata Inference
 
 This project organizes the MAASAI workflow as a modular LangGraph application.
 
@@ -19,8 +18,8 @@ This project organizes the MAASAI workflow as a modular LangGraph application.
 - `maasai/tools.py` - astronomy REST/MCP tool stubs
 - `maasai/nodes.py` - graph node functions
 - `maasai/graph.py` - graph topology
-- `main.py` - runnable entry point
-- `litellm_config_maasai.yaml` - LiteLLM Proxy config with an upstream pool on port 8000
+- `scripts/run.py` - runnable entry point
+- `config/litellm_config_template.yaml` - LiteLLM Proxy config with an upstream pool on port 8000
 
 ## Install
 
@@ -31,21 +30,21 @@ pip install -r requirements.txt
 ```
 
 ## Run LiteLLM Proxy
+For testing the LiteLLM proxy run:
 
 ```bash
-litellm --config litellm_config_maasai.yaml
+litellm --config litellm_config.yaml
 ```
 
 ## Run the app
 
 ```bash
-cp .env.example .env
-python main.py
+python scripts/run.py --config=litellm_config.yaml [OPTIONS]   
 ```
 
 ## Notes
 
-- The Python app only chooses the logical aliases `astro-small`, `astro-medium`, `astro-large`, and `astro-multimodal`.
-- LiteLLM Proxy performs the actual load balancing across the remote vLLM or LLumnix endpoints.
+- The Python app only chooses the logical aliases `model-tiny`, `model-small`, `model-medium`, `model-large`, `model-commercial-mini`, and `model-commercial`.
+- LiteLLM Proxy performs the actual load balancing across the remote OLLAMA/ChatGPT endpoints.
 - Replace the placeholder endpoint IPs with your real servers.
 - Replace the RAG stub and tool stubs with your production integrations.
