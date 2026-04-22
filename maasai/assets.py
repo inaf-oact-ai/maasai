@@ -33,23 +33,36 @@ def _prepare_asset(item: dict[str, Any], ctx: NodeContext) -> PreparedAsset:
 	if lower.endswith((".fits", ".fit", ".fts")):
 		preview_path = None # not saving preview for the moment
 		data_uint8 = _fits2png(path, save=False, outfile=preview_path)
-		base64_data = _encode_image_base64(data_uint8)
-		
+		is_valid= True
+		error= ""
+		if data_uint8 is None:
+			base64_data = None
+			error= "Failed to convert FITS to PNG preview (file not existing/corrupted/with unexpected format)"
+			is_valid= False
+		else:
+			base64_data = _encode_image_base64(data_uint8)
+			if base64_data is None:
+				error= "Failed to convert FITS preview to base64"
+				is_valid= False
+			
 		#print("DEBUG FITS ASSET")
 		#print("path =", path)
 		#print("data_uint8 is None =", data_uint8 is None)
 		#print("base64_data is None =", base64_data is None)
 		#print("base64 len =", 0 if base64_data is None else len(base64_data))
 		
-		asset= PreparedAsset(
+		asset = PreparedAsset(
 			path=path,
 			kind="fits",
 			original_mime_type="application/fits",
-			preview_mime_type="image/png",
+			preview_mime_type="image/png" if base64_data is not None or preview_path is not None else None,
 			preview_path=preview_path,
 			base64_data=base64_data,
-			notes=["Converted from FITS using zscale preview"],
+			notes=["Converted from FITS using zscale preview"] if is_valid else ["FITS preview generation failed"],
+			error=error,
+			is_valid=is_valid,
 		)
+
 		#print("DEBUG PREPARED ASSET MODEL")
 		#print(asset)
 		#print(asset.model_dump())
@@ -59,6 +72,12 @@ def _prepare_asset(item: dict[str, Any], ctx: NodeContext) -> PreparedAsset:
 	if lower.endswith((".png", ".jpg", ".jpeg", ".webp")):
 		orig_mime = _guess_mime_type(path)
 		base64_data = _encode_image_base64(path)
+		error= ""
+		is_valid= True
+		if base64_data is None:
+			error= "Failed to convert FITS preview to base64"
+			is_valid= False
+		
 		return PreparedAsset(
 			path=path,
 			kind="image",
@@ -66,6 +85,8 @@ def _prepare_asset(item: dict[str, Any], ctx: NodeContext) -> PreparedAsset:
 			preview_mime_type=orig_mime,
 			preview_path=path,
 			base64_data=base64_data,
+			error=error,
+			is_valid=is_valid
 		)
 
 	return PreparedAsset(
@@ -74,6 +95,8 @@ def _prepare_asset(item: dict[str, Any], ctx: NodeContext) -> PreparedAsset:
 		original_mime_type=_guess_mime_type(path),
 		preview_mime_type=None,
 		notes=["Unsupported for multimodal preview"],
+		error="Unsupported file format",
+		is_valid=False
 	)
 	
 def _asset_field(asset, name, default=None):

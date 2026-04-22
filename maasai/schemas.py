@@ -20,7 +20,8 @@ class PreparedAsset(BaseModel):
 	preview_path: str | None = None
 	base64_data: str | None = None
 	notes: list[str] = Field(default_factory=list)
-	
+	error: str | None = None
+	is_valid: bool | None = None
 	
 class IntakeDecision(BaseModel):
 	""" A data structure to hold results of user prompt/asset triage analysis """

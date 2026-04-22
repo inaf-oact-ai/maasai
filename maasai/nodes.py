@@ -158,6 +158,35 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 			_prepare_asset(item, ctx)
 		)
 		
+	valid_assets = [a for a in prepared_assets if getattr(a, "base64_data", None) or getattr(a, "preview_path", None)]
+	invalid_assets = [a for a in prepared_assets if a not in valid_assets]
+	if invalid_assets:
+		logger.warning(f"Received {len(invalid_assets)}/{len(prepared_assets)} attachments, return failure!")
+		attachment_errors = []
+		for asset in invalid_assets:
+			attachment_errors.append({
+				"path": getattr(asset, "path", None),
+				"kind": getattr(asset, "kind", None),
+				"error": getattr(asset, "error", "Invalid attachment"),
+			})
+		
+		return {
+			"raw_user_text": raw_user_text,
+			"multimodal": len(prepared_assets) > 0,
+			"prepared_assets": prepared_assets,
+			"language_precheck_ok": None,
+			"language_model_ok": None,
+			"language_ok": None,
+			"pii_precheck_detected": None,
+			"pii_model_detected": None,
+			"pii_detected": None,
+			"domain_ok": None,
+			"intake_reason": "Invalid attachments received",
+			"attachment_errors": attachment_errors,
+			"status": "invalid_attachments",
+			"route_reason": "One or more attachments could not be opened or converted.",
+		}
+	
 	logger.info("--> intake_triage(): prepared_assets")
 	print("prepared_assets")
 	print(prepared_assets)
@@ -514,6 +543,21 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	_ = ctx
 
 	status = state.get("status")
+
+	if status == "invalid_attachments":
+		final = FinalAnswer(
+			status="error",
+			message="One or more attachments could not be opened or processed.",
+			answer=None,
+			citations=[],
+			artifacts=[],
+			debug={
+				"route_reason": state.get("route_reason"),
+				"intake_reason": state.get("intake_reason"),
+				"attachment_errors": state.get("attachment_errors", []),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
 
 	if status == "blocked_intake" and not state.get("intake_decision"):
 		final = FinalAnswer(
