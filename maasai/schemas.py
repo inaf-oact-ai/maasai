@@ -15,10 +15,12 @@ class PreparedAsset(BaseModel):
 	""" A data structure to hold user provided data assets """
 	path: str
 	kind: Literal["fits", "image", "other"]
-	mime_type: str | None = None
+	original_mime_type: str | None = None
+	preview_mime_type: str | None = None
 	preview_path: str | None = None
 	base64_data: str | None = None
 	notes: list[str] = Field(default_factory=list)
+	
 	
 class IntakeDecision(BaseModel):
 	""" A data structure to hold results of user prompt/asset triage analysis """
@@ -29,7 +31,7 @@ class IntakeDecision(BaseModel):
 	images_astronomy_ok: bool = True
 	reason: str
 	normalized_text: str
-	prepared_assets: list[PreparedAsset] = Field(default_factory=list)
+	#prepared_assets: list[PreparedAsset] = Field(default_factory=list)
 		
 #class RAGDocument(BaseModel):
 #	doctype: str | None = None

@@ -57,19 +57,24 @@ def _build_intake_prompt(
 			"",
 			"ATTACHMENTS:",
 		])
+		
 		for idx, asset in enumerate(prepared_assets, start=1):
-			#path = getattr(asset, "path", None) or asset.get("path", "")
-			#kind = getattr(asset, "kind", None) or asset.get("kind", "unknown")
-			#notes = getattr(asset, "notes", None) or asset.get("notes", [])
 			path = _asset_field(asset, "path", "")
 			kind = _asset_field(asset, "kind", "unknown")
 			notes = _asset_field(asset, "notes", [])
+			original_mime_type = _asset_field(asset, "original_mime_type", None)
+			preview_mime_type = _asset_field(asset, "preview_mime_type", None)
 
 			lines.append(f"- Asset {idx}:")
 			lines.append(f"  kind: {kind}")
 			lines.append(f"  path: {path}")
+			if original_mime_type:
+				lines.append(f"  original_mime_type: {original_mime_type}")
+			if preview_mime_type:
+				lines.append(f"  preview_mime_type: {preview_mime_type}")
 			if notes:
 				lines.append(f"  notes: {notes}")
+
 	else:
 		lines.extend([
 			"",
@@ -91,12 +96,12 @@ def _build_intake_message_content(
 	content = [{"type": "text", "text": _build_intake_prompt(text, prepared_assets)}]
 
 	for asset in prepared_assets:
-		mime_type = getattr(asset, "mime_type", None)
-		if asset.base64_data and mime_type:
+		preview_mime_type = getattr(asset, "preview_mime_type", None)
+		if asset.base64_data and preview_mime_type:
 			content.append({
 				"type": "image_url",
 				"image_url": {
-					"url": f"data:{mime_type};base64,{asset.base64_data}"
+					"url": f"data:{preview_mime_type};base64,{asset.base64_data}"
 				},
 			})
 

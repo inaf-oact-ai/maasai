@@ -168,7 +168,7 @@ def build_runtime(args):
 def run_graph(
 	graph,
 	query: str, 
-	attachments: list(str)=[],
+	attachments: list[dict[str, str]] | None = None,
 	thread_id: str="maasai-thread"
 ) -> None:
 	""" Helper to run the agentic graph and return the final answer. """
@@ -177,6 +177,7 @@ def run_graph(
 	config = {"configurable": {"thread_id": thread_id}}
 
 	# - Define input message    
+	attachments = attachments or []
 	initial_state = {
 		"messages": [
 			HumanMessage(content=query)
@@ -231,6 +232,13 @@ def run_graph(
 	if final.debug:
 		print("\nDebug:")
 		print(final.debug)
+		
+	# - Print other debug state fields
+	#print("\n=== GRAPH RESULT KEYS ===")
+	#print(result.keys())
+
+	#print("\n=== PREPARED ASSETS IN STATE ===")
+	#print(result.get("prepared_assets"))
 			
 	
 def run_cli(graph, args):

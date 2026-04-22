@@ -30,25 +30,40 @@ def _prepare_asset(item: dict[str, Any], ctx: NodeContext) -> PreparedAsset:
 	path = item["path"]
 	lower = path.lower()
 	
-	if lower.endswith((".fits")):
+	if lower.endswith((".fits", ".fit", ".fts")):
 		preview_path = None # not saving preview for the moment
 		data_uint8 = _fits2png(path, save=False, outfile=preview_path)
 		base64_data = _encode_image_base64(data_uint8)
-		return PreparedAsset(
+		
+		#print("DEBUG FITS ASSET")
+		#print("path =", path)
+		#print("data_uint8 is None =", data_uint8 is None)
+		#print("base64_data is None =", base64_data is None)
+		#print("base64 len =", 0 if base64_data is None else len(base64_data))
+		
+		asset= PreparedAsset(
 			path=path,
 			kind="fits",
-			mime_type="image/png",
+			original_mime_type="application/fits",
+			preview_mime_type="image/png",
 			preview_path=preview_path,
 			base64_data=base64_data,
 			notes=["Converted from FITS using zscale preview"],
 		)
+		#print("DEBUG PREPARED ASSET MODEL")
+		#print(asset)
+		#print(asset.model_dump())
+		
+		return asset
 
 	if lower.endswith((".png", ".jpg", ".jpeg", ".webp")):
+		orig_mime = _guess_mime_type(path)
 		base64_data = _encode_image_base64(path)
 		return PreparedAsset(
 			path=path,
 			kind="image",
-			mime_type=_guess_mime_type(path),
+			original_mime_type=orig_mime,
+			preview_mime_type=orig_mime,
 			preview_path=path,
 			base64_data=base64_data,
 		)
@@ -56,6 +71,8 @@ def _prepare_asset(item: dict[str, Any], ctx: NodeContext) -> PreparedAsset:
 	return PreparedAsset(
 		path=path,
 		kind="other",
+		original_mime_type=_guess_mime_type(path),
+		preview_mime_type=None,
 		notes=["Unsupported for multimodal preview"],
 	)
 	
@@ -73,7 +90,7 @@ def _guess_mime_type(path: str) -> str | None:
 		return "image/jpeg"
 	if lower.endswith((".webp",)):
 		return "image/webp"
-	if lower.endswith((".fits")):
+	if lower.endswith((".fits", ".fit", ".fts")):
 		return "application/fits"
 
 	return None	

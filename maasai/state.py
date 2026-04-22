@@ -10,6 +10,8 @@ from typing_extensions import TypedDict
 
 # - MAASAI MODULES
 from .schemas import FinalAnswer
+from .schemas import PreparedAsset
+from .schemas import IntakeDecision
 #from .schemas import ApprovalDecision
 #from .schemas import DomainDecision
 #from .schemas import OptimizedPrompt
@@ -25,6 +27,8 @@ class GraphState(TypedDict, total=False):
 	raw_user_text: str
 	multimodal: bool
 	attachments: list[dict[str, Any]]
+	prepared_assets: list[PreparedAsset]
+	intake_decision: IntakeDecision | None
 
 	language_ok: bool | None
 	pii_detected: bool | None
