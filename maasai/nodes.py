@@ -6,6 +6,7 @@ from __future__ import annotations
 ##################################################
 # - STANDARD MODULES
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # - LLM/LANGCHAIN MODULES
 from langchain.messages import HumanMessage
@@ -39,6 +40,22 @@ def _extract_text(messages: list[Any]) -> str:
 					chunks.append(str(item.get("text", "")))
 	return "\n".join(part for part in chunks if part).strip()
 
+
+#def _invoke_with_timeout(agent, payload, timeout_s: float):
+#	with ThreadPoolExecutor(max_workers=1) as executor:
+#		future = executor.submit(agent.invoke, payload)
+#		return future.result(timeout=timeout_s)
+
+def _invoke_with_timeout(agent, payload, timeout_s: float):
+	executor = ThreadPoolExecutor(max_workers=1)
+	future = executor.submit(agent.invoke, payload)
+	try:
+		return future.result(timeout=timeout_s)
+	except FuturesTimeoutError:
+		future.cancel()
+		raise
+	finally:
+		executor.shutdown(wait=False, cancel_futures=True)
 
 def _build_intake_prompt(
 	text: str,
@@ -174,10 +191,57 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	print("message_content")
 	print(message_content)
 
+	# - Invoke agent
 	logger.info("--> intake_triage(): Invoking intake_agent on prompt ...")
-	decision = ctx.agents.intake_agent.invoke({
-		"messages": [HumanMessage(content=message_content)]
-	})["structured_response"]
+	#decision = ctx.agents.intake_agent.invoke({
+	#	"messages": [HumanMessage(content=message_content)]
+	#})["structured_response"]
+
+	timeout_s = ctx.settings.llm.timeout_seconds
+	try:
+		response = _invoke_with_timeout(
+			ctx.agents.intake_agent,
+			{"messages": [HumanMessage(content=message_content)]},
+			timeout_s=timeout_s,
+		)
+		decision = response["structured_response"]
+
+	except FuturesTimeoutError:
+		logger.exception("intake_agent timed out")
+		return {
+			"raw_user_text": raw_user_text,
+			"multimodal": len(prepared_assets) > 0,
+			"prepared_assets": prepared_assets,
+			"language_precheck_ok": language_precheck_ok,
+			"language_model_ok": None,
+			"language_ok": language_precheck_ok,
+			"pii_precheck_detected": pii_precheck_detected,
+			"pii_model_detected": None,
+			"pii_detected": pii_precheck_detected,
+			"domain_ok": None,
+			"intake_reason": "The intake model did not respond before the timeout.",
+			"status": "blocked_intake",
+			"route_reason": "The intake model is unavailable or unreachable.",
+		}
+
+	except Exception as exc:
+		logger.exception("intake_agent failed")
+		return {
+			"raw_user_text": raw_user_text,
+			"multimodal": len(prepared_assets) > 0,
+			"prepared_assets": prepared_assets,
+			"language_precheck_ok": language_precheck_ok,
+			"language_model_ok": None,
+			"language_ok": language_precheck_ok,
+			"pii_precheck_detected": pii_precheck_detected,
+			"pii_model_detected": None,
+			"pii_detected": pii_precheck_detected,
+			"domain_ok": None,
+			"intake_reason": str(exc),
+			"status": "blocked_intake",
+			"route_reason": f"Intake model invocation failed: {exc}",
+		}
+
 
 	print("decision")
 	print(decision)
@@ -446,11 +510,24 @@ def assess_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 #	return {"final_answer": final}
 
 
-
 def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	_ = ctx
 
 	status = state.get("status")
+
+	if status == "blocked_intake" and not state.get("intake_decision"):
+		final = FinalAnswer(
+			status="error",
+			message="The intake model is currently unavailable.",
+			answer=None,
+			citations=[],
+			artifacts=[],
+			debug={
+				"route_reason": state.get("route_reason"),
+				"intake_reason": state.get("intake_reason"),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
 
 	if status in {"blocked_language", "blocked_pii", "blocked_domain", "blocked_intake", "rejected_after_iterations"}:
 		language_precheck_ok = state.get("language_precheck_ok", True)

@@ -64,7 +64,8 @@ def get_args():
 	
 	# - LLM options
 	parser.add_argument('-temperature','--temperature', dest='temperature', required=False, type=float, default=0.0, help='Default temperature value') 
-	
+	parser.add_argument("--llm-timeout", type=float, default=None, help="Timeout in seconds for LLM calls",)
+
 	# - RUN options
 	parser.add_argument('-config_litellm','--config_litellm', dest='config_litellm', required=True, type=str, help='Input yaml config file for LiteLLM') 
 	parser.add_argument("--mode", choices=["cli", "api"], default="cli")
@@ -94,6 +95,18 @@ def build_runtime(args):
 	""" Create agent graph """
 	
 	#===========================
+	#==   CREATE SETTINGS
+	#===========================
+	# - Create settings
+	logger.info("Create settings ...")
+	settings= Settings()
+	
+	# - Override settings
+	if args.llm_timeout is not None:
+		settings.llm.timeout_seconds = args.llm_timeout
+		settings.litellm.timeout_seconds = args.llm_timeout
+	
+	#===========================
 	#==   CREATE LLM ROUTER
 	#===========================
 	# - Load the YAML config
@@ -105,11 +118,18 @@ def build_runtime(args):
 		logger.error(f"Failed to load LiteLLM config file {args.config_litellm} (err={str(e)}, exit!")
 		return None
 
+	# - Set router settings
+	router_settings = dict(config.get("router_settings", {}))
+	router_settings.setdefault("timeout", settings.litellm.timeout_seconds)
+	router_settings.setdefault("num_retries", 0)
+	router_settings.setdefault("retry_after", 0)
+
 	# - Create a LiteLLM Router with the model list from the config
 	logger.info(f"Creating a LiteLLM Router with model list parsed from config file {args.config_litellm} ...")
 	litellm_router = Router(
 		model_list=config['model_list'],
-		**config.get("router_settings", {})
+		#**config.get("router_settings", {})
+		**router_settings
 	)
 	
 	# - Create a model router using LiteLLM router
@@ -140,9 +160,6 @@ def build_runtime(args):
 	#===========================
 	#==   BUILD GRAPH
 	#===========================
-	# - Create settings
-	logger.info("Create settings ...")
-	settings= Settings()
 	
 	# - Create memory
 	logger.info("Creating graph memory ...")

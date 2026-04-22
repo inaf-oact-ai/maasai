@@ -14,6 +14,10 @@ class LiteLLMProxySettings:
 	alias_large: str = field(default_factory=lambda: os.getenv("LITELLM_ALIAS_LARGE", "astro-large"))
 	alias_multimodal: str = field(default_factory=lambda: os.getenv("LITELLM_ALIAS_MULTIMODAL", "astro-multimodal"))
 
+@dataclass(slots=True)
+class LLMSettings():
+	timeout_seconds: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "20")))
+
 
 @dataclass(slots=True)
 class WorkflowSettings:
@@ -25,6 +29,7 @@ class WorkflowSettings:
 @dataclass(slots=True)
 class Settings:
 	litellm: LiteLLMProxySettings = field(default_factory=LiteLLMProxySettings)
+	llm: LLMSettings = LLMSettings()
 	workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
 
 
