@@ -58,20 +58,17 @@ def get_args():
 	"""This function parses and return arguments passed in"""
 	parser = argparse.ArgumentParser(description="Parse args.")
 
-	##### MANDATORY ######
 	# - Input options
-	parser.add_argument('-config_litellm','--config_litellm', dest='config_litellm', required=True, type=str, help='Input yaml config file for LiteLLM') 
-	
-	# - Task options (MANDATORY ONLY IN CLI MODE)
 	parser.add_argument('-query','--query', dest='query', required=False, default=None, type=str, help='Input user query') 
+	parser.add_argument("--input_imgs", default="")
 	
-	##### OPTIONAL #######
 	# - LLM options
 	parser.add_argument('-temperature','--temperature', dest='temperature', required=False, type=float, default=0.0, help='Default temperature value') 
 	
 	# - RUN options
+	parser.add_argument('-config_litellm','--config_litellm', dest='config_litellm', required=True, type=str, help='Input yaml config file for LiteLLM') 
 	parser.add_argument("--mode", choices=["cli", "api"], default="cli")
-	parser.add_argument("--thread-id", type=str, default="maasai-demo-thread")
+	parser.add_argument("--thread-id", type=str, default="maasai-thread")
 	
 	# - API options
 	parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -171,9 +168,10 @@ def build_runtime(args):
 def run_graph(
 	graph,
 	query: str, 
-	thread_id: str
+	attachments: list(str)=[],
+	thread_id: str="maasai-thread"
 ) -> None:
-	"""Helper to run the agentic graph and return the final answer."""
+	""" Helper to run the agentic graph and return the final answer. """
 
 	# - Define config    
 	config = {"configurable": {"thread_id": thread_id}}
@@ -181,12 +179,14 @@ def run_graph(
 	# - Define input message    
 	initial_state = {
 		"messages": [
-			HumanMessage(
-				content=query
-			)
-		]
+			HumanMessage(content=query)
+		],
+		"attachments": attachments,
 	}
-
+	
+	print("initial_state")
+	print(initial_state)
+	
 	# - Invoke graph
 	logger.info(f"Run user query: {query} ...")
 	result = graph.invoke(initial_state, config=config)
@@ -233,9 +233,6 @@ def run_graph(
 		print(final.debug)
 			
 	
-	
-	
-
 def run_cli(graph, args):
 	""" Run graph in CLI mode for test purposes """
 
@@ -243,12 +240,22 @@ def run_cli(graph, args):
 	if not args.query or args.query is None or args.query=="":
 		print("Missing --query or empty query in cli mode")
 		return 1
+		
+	# - Set input arguments
+	attachments = []
+	if args.input_imgs.strip():
+		for raw_path in args.input_imgs.split(","):
+			path = raw_path.strip()
+			if not path:
+				continue
+			attachments.append({"path": os.path.abspath(path)})
 
 	# - Run graph
 	logger.info(f"Run graph with user query: {args.query}")
 	return run_graph(
 		graph=graph,
 		query=args.query,
+		attachments=attachments,
 		thread_id="maasai-thread"
 	)
 	

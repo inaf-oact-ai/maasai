@@ -13,3 +13,7 @@ langchain_litellm
 langgraph
 litellm
 grandalf
+fastapi
+langdetect
+pillow
+astropy

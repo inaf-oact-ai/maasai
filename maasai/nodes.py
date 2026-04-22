@@ -16,7 +16,9 @@ from .agents import AgentFactory
 from .config import Settings
 from .guardrails import detect_pii, is_probably_english, is_scientific_or_astronomy_related, wrap_guardrail_response
 from .rag import PromptRAG
+from .assets import _prepare_asset, _asset_field
 from .schemas import FinalAnswer
+from .schemas import PreparedAsset
 #from .schemas import ApprovalDecision, DomainDecision, FinalAnswer, OptimizedPrompt, PlanStep, PromptAssessment, StepResult, TaskPlan
 from .state import GraphState
 from maasai import logger
@@ -56,9 +58,12 @@ def _build_intake_prompt(
 			"ATTACHMENTS:",
 		])
 		for idx, asset in enumerate(prepared_assets, start=1):
-			path = getattr(asset, "path", None) or asset.get("path", "")
-			kind = getattr(asset, "kind", None) or asset.get("kind", "unknown")
-			notes = getattr(asset, "notes", None) or asset.get("notes", [])
+			#path = getattr(asset, "path", None) or asset.get("path", "")
+			#kind = getattr(asset, "kind", None) or asset.get("kind", "unknown")
+			#notes = getattr(asset, "notes", None) or asset.get("notes", [])
+			path = _asset_field(asset, "path", "")
+			kind = _asset_field(asset, "kind", "unknown")
+			notes = _asset_field(asset, "notes", [])
 
 			lines.append(f"- Asset {idx}:")
 			lines.append(f"  kind: {kind}")
@@ -77,6 +82,25 @@ def _build_intake_prompt(
 	])
 
 	return "\n".join(lines)
+
+
+def _build_intake_message_content(
+	text: str,
+	prepared_assets: list[PreparedAsset],
+) -> list[dict[str, Any]]:
+	content = [{"type": "text", "text": _build_intake_prompt(text, prepared_assets)}]
+
+	for asset in prepared_assets:
+		mime_type = getattr(asset, "mime_type", None)
+		if asset.base64_data and mime_type:
+			content.append({
+				"type": "image_url",
+				"image_url": {
+					"url": f"data:{mime_type};base64,{asset.base64_data}"
+				},
+			})
+
+	return content
 
 ##################################################
 ###          GRAPH NODES
@@ -136,18 +160,18 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	pii_precheck_detected = bool(pii_reasons)
 
 	# 4. domain/scope decision from text + prepared image summaries
-	intake_prompt = _build_intake_prompt(
+	message_content = _build_intake_message_content(
 		text=raw_user_text,
-		prepared_assets=prepared_assets
+		prepared_assets=prepared_assets,
 	)
 	
-	logger.info("--> intake_triage(): intake_prompt")
-	print("intake_prompt")
-	print(intake_prompt)
+	logger.info("--> intake_triage(): message_content")
+	print("message_content")
+	print(message_content)
 
 	logger.info("--> intake_triage(): Invoking intake_agent on prompt ...")
 	decision = ctx.agents.intake_agent.invoke({
-		"messages": [HumanMessage(content=intake_prompt)]
+		"messages": [HumanMessage(content=message_content)]
 	})["structured_response"]
 
 	print("decision")
