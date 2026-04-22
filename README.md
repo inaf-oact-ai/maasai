@@ -1,5 +1,5 @@
 <p align="left">
-  <img src="share/Logo_MAASAI_noborder.png.png" alt="MAASAI logo"/>
+  <img src="share/Logo_MAASAI_noborder.png" alt="MAASAI logo"/>
 </p>
 
 # maasai
