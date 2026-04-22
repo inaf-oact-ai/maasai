@@ -41,6 +41,8 @@ class GraphState(TypedDict, total=False):
 	intake_reason: str | None
 	pii_reasons: list[str]
 	
+	attachment_errors: list[dict[str, Any]]
+	
 	#domain_decision: DomainDecision
 
 	#prompt_assessment: PromptAssessment

@@ -158,8 +158,9 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 			_prepare_asset(item, ctx)
 		)
 		
-	valid_assets = [a for a in prepared_assets if getattr(a, "base64_data", None) or getattr(a, "preview_path", None)]
-	invalid_assets = [a for a in prepared_assets if a not in valid_assets]
+	valid_assets = [a for a in prepared_assets if getattr(a, "is_valid", False)]
+	invalid_assets = [a for a in prepared_assets if not getattr(a, "is_valid", False)]
+	
 	if invalid_assets:
 		logger.warning(f"Received {len(invalid_assets)}/{len(prepared_assets)} attachments, return failure!")
 		attachment_errors = []
