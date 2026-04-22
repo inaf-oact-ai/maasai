@@ -1,4 +1,4 @@
-<p align="left">
+<p align="left" width="100">
   <img src="share/Logo_MAASAI_noborder.png" alt="MAASAI logo"/>
 </p>
 
