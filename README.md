@@ -1,5 +1,5 @@
 <p align="left">
-  <img src="share/Logo_MAASAI_noborder.png" alt="MAASAI logo" width="300"/>
+  <img src="share/Logo_MAASAI_noborder.jpg" alt="MAASAI logo" width="300"/>
 </p>
 
 # Multi-Agent AI System for Astrodata Inference
