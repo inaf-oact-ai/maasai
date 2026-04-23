@@ -176,10 +176,11 @@ routing_policy:
   default_alias: model-small
 
   task_to_alias:
-    language_check: model-tiny
-    pii_check: model-tiny
-    domain_affinity: model-small
+  	intake: model-tiny
     prompt_assessment: model-small
+    #language_check: model-tiny
+    #pii_check: model-tiny
+    #domain_affinity: model-small
     prompt_optimization: model-medium
     approval_rewrite: model-medium
     planner: model-large
@@ -214,10 +215,11 @@ routing_policy:
 
   provider_preferences:
     prefer_local_for:
-      - language_check
-      - pii_check
-      - domain_affinity
+      - intake
       - prompt_assessment
+      #- language_check
+      #- pii_check
+      #- domain_affinity
       - prompt_optimization
       - worker
       - caesar_execution_support
