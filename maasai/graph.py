@@ -8,7 +8,7 @@ from __future__ import annotations
 from functools import partial
 
 # - LLM/LANGCHAIN MODULES
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.memory import BaseCheckpointSaver, InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 # - MAASAI MODULES
@@ -51,18 +51,15 @@ def _after_intake(state: GraphState) -> str:
 		return "assess_prompt"
 	return "final_guardrail"
 
-def _after_language(state: GraphState) -> str:
-	return "pii_gate" if state.get("language_ok", False) else "final_guardrail"
+#def _after_language(state: GraphState) -> str:
+#	return "pii_gate" if state.get("language_ok", False) else "final_guardrail"
 
+#def _after_pii(state: GraphState) -> str:
+#	return "domain_affinity" if not state.get("pii_detected", False) else "final_guardrail"
 
-def _after_pii(state: GraphState) -> str:
-	return "domain_affinity" if not state.get("pii_detected", False) else "final_guardrail"
-
-
-def _after_domain(state: GraphState) -> str:
-	decision = state.get("domain_decision")
-	return "assess_prompt" if decision and decision.allowed else "final_guardrail"
-
+#def _after_domain(state: GraphState) -> str:
+#	decision = state.get("domain_decision")
+#	return "assess_prompt" if decision and decision.allowed else "final_guardrail"
 
 def _after_assessment(state: GraphState) -> str:
 	assessment = state.get("prompt_assessment")
@@ -120,7 +117,7 @@ def build_graph(
 	##builder.add_node("pii_gate", partial(pii_gate, ctx=ctx))
 	##builder.add_node("domain_affinity", partial(domain_affinity, ctx=ctx))
 	
-	#builder.add_node("assess_prompt", partial(assess_prompt, ctx=ctx))
+	builder.add_node("assess_prompt", partial(assess_prompt, ctx=ctx))
 	#builder.add_node("rewrite_prompt", partial(rewrite_prompt, ctx=ctx))
 	
 	#builder.add_node("approval", partial(approval_node, ctx=ctx))
@@ -133,19 +130,31 @@ def build_graph(
 	builder.add_node("final_guardrail", partial(final_guardrail, ctx=ctx))
 
 	# - Connect nodes
+	
+	############# TEST INTAKE ################
+	#builder.add_edge(START, "intake_triage")
+	#builder.add_edge("intake_triage", "final_guardrail")
+	#builder.add_edge("final_guardrail", END)
+	##########################################
+	
+	############# TEST INTAKE+ASSESS PROMPT ################
+	builder.add_edge(START, "intake_triage")
+	builder.add_conditional_edges("intake_triage", _after_intake, {
+		"assess_prompt": "assess_prompt",
+		"final_guardrail": "final_guardrail",
+	})
+	builder.add_edge("assess_prompt", "final_guardrail")
+	builder.add_edge("final_guardrail", END)
+	#######################################################
+	
+
+	####  TO BE REMOVED ###
 	#builder.add_edge(START, "intake_triage")
 	#builder.add_conditional_edges("intake_triage", _after_intake, {
 	#	"assess_prompt": "assess_prompt",
 	#	"final_guardrail": "final_guardrail",
 	#})
 	
-	############# TEST ################
-	builder.add_edge(START, "intake_triage")
-	builder.add_edge("intake_triage", "final_guardrail")
-	builder.add_edge("final_guardrail", END)
-	####################################
-
-	####  TO BE REMOVED ###
 	#builder.add_edge(START, "normalize_input")
 	#builder.add_edge("normalize_input", "language_gate")
 	#builder.add_conditional_edges("language_gate", _after_language, {

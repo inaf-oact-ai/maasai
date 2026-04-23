@@ -20,6 +20,7 @@ from .rag import PromptRAG
 from .assets import _prepare_asset, _asset_field
 from .schemas import FinalAnswer
 from .schemas import PreparedAsset
+from .schemas import PromptAssessment
 #from .schemas import ApprovalDecision, DomainDecision, FinalAnswer, OptimizedPrompt, PlanStep, PromptAssessment, StepResult, TaskPlan
 from .state import GraphState
 from maasai import logger
@@ -123,6 +124,59 @@ def _build_intake_message_content(
 			})
 
 	return content
+
+
+def _build_assessment_prompt(
+	raw_user_text: str,
+	prepared_assets: list[Any] | None = None,
+	intake_decision: Any | None = None,
+) -> str:
+	"""Create prompt for assessment agent."""
+	prepared_assets = prepared_assets or []
+
+	lines = [
+		"USER REQUEST:",
+		raw_user_text or "<empty>",
+	]
+
+	if intake_decision is not None:
+		lines.extend([
+			"",
+			"INTAKE SUMMARY:",
+			f"- accepted: {getattr(intake_decision, 'accepted', None)}",
+			f"- domain_ok: {getattr(intake_decision, 'domain_ok', None)}",
+			f"- reason: {getattr(intake_decision, 'reason', None)}",
+		])
+
+	if prepared_assets:
+		lines.extend([
+			"",
+			"ATTACHMENTS:",
+		])
+		for idx, asset in enumerate(prepared_assets, start=1):
+			lines.append(f"- Asset {idx}:")
+			lines.append(f"  kind: {_asset_field(asset, 'kind', 'unknown')}")
+			lines.append(f"  path: {_asset_field(asset, 'path', '')}")
+			notes = _asset_field(asset, 'notes', [])
+			if notes:
+				lines.append(f"  notes: {notes}")
+	else:
+		lines.extend([
+			"",
+			"ATTACHMENTS: none",
+		])
+
+	lines.extend([
+		"",
+		"ASSESSMENT INSTRUCTIONS:",
+		"- needs_rewrite must be True only if downstream execution should not proceed without rewriting.",
+		"- rewrite_would_help should be True if the request is understandable but could be improved.",
+		"- executable_as_is should be True if a useful direct answer or action is possible already.",
+		"- Identify missing details and non-blocking ambiguities separately.",
+		"- If rewrite is useful or required, provide a rewrite_goal describing the intended improvement.",
+	])
+
+	return "\n".join(lines)
 
 ##################################################
 ###          GRAPH NODES
@@ -333,11 +387,38 @@ def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	
 
 def assess_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-	assessment = ctx.agents.assessment_agent.invoke({
-		"messages": [HumanMessage(content=state["raw_user_text"])]
-	})["structured_response"]
-	return {"prompt_assessment": assessment}
+	"""Assess whether an accepted request is ready for downstream execution."""
+	raw_user_text = state.get("raw_user_text", "")
+	prepared_assets = state.get("prepared_assets", [])
+	intake_decision = state.get("intake_decision")
 
+	assessment_prompt = _build_assessment_prompt(
+		raw_user_text=raw_user_text,
+		prepared_assets=prepared_assets,
+		intake_decision=intake_decision,
+	)
+
+	logger.info("--> assess_prompt(): invoking assessment_agent ...")
+
+	response = ctx.agents.assessment_agent.invoke({
+		"messages": [HumanMessage(content=assessment_prompt)]
+	})
+	assessment: PromptAssessment = response["structured_response"]
+
+	logger.info(
+		"---> assess_prompt(): "
+		f"needs_rewrite={assessment.needs_rewrite}, "
+		f"rewrite_would_help={assessment.rewrite_would_help}, "
+		f"executable_as_is={assessment.executable_as_is}, "
+		f"complexity={assessment.complexity}, "
+		f"requires_planning={assessment.requires_planning}, "
+		f"suggested_worker={assessment.suggested_worker}"
+	)
+
+	return {
+		"prompt_assessment": assessment,
+		"status": "needs_rewrite" if assessment.needs_rewrite else "running",
+	}
 
 
 #def normalize_input(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
@@ -545,6 +626,7 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 
 	status = state.get("status")
 
+	# - ERROR: Invalid attachment
 	if status == "invalid_attachments":
 		final = FinalAnswer(
 			status="error",
@@ -560,6 +642,7 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		)
 		return {"final_answer": final, "status": "done"}
 
+	# - ERROR: Input user request cannot be validated by intake agent
 	if status == "blocked_intake" and not state.get("intake_decision"):
 		final = FinalAnswer(
 			status="error",
@@ -574,6 +657,7 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		)
 		return {"final_answer": final, "status": "done"}
 
+	# - Input user request blocked by intake agent
 	if status in {"blocked_language", "blocked_pii", "blocked_domain", "blocked_intake", "rejected_after_iterations"}:
 		language_precheck_ok = state.get("language_precheck_ok", True)
 		language_model_ok = state.get("language_model_ok", None)
@@ -585,8 +669,7 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		
 		domain_ok = state.get("domain_ok", True)
 		intake_reason = state.get("intake_reason")
-
-
+		
 		reasons = []
 		if not language_ok:
 			reasons.append("it is not in English")
@@ -631,12 +714,67 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		print(final)
 		return {"final_answer": final, "status": "done"}
 
+	# - Request marked as to be re-written by prompt assessment agent
+	if status == "needs_rewrite":
+		assessment = state.get("prompt_assessment")
+		final = FinalAnswer(
+			status="ok",
+			message="Request passed intake triage but requires rewrite before execution.",
+			answer=(
+				"The request is in scope, but it is not yet ready for downstream execution.\n\n"
+				f"Rewrite goal: {getattr(assessment, 'rewrite_goal', None)}\n"
+				f"Missing details: {getattr(assessment, 'missing_details', None)}\n"
+				f"Ambiguities: {getattr(assessment, 'ambiguities', None)}\n"
+				f"Reasoning summary: {getattr(assessment, 'reasoning_summary', None)}"
+			),
+			citations=[],
+			artifacts=[],
+			debug={
+				"prompt_assessment": assessment.model_dump() if assessment else None,
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+
+	#######################################
+	##      SUCCESS
+	#######################################
+	#final = FinalAnswer(
+	#	status="ok",
+	#	message="Request passed intake triage.",
+	#	answer="The request passed intake triage, but no downstream execution node is enabled in this test graph yet.",
+	#	citations=[],
+	#	artifacts=[],
+	#	debug={},
+	#)
+	#return {"final_answer": final, "status": "done"}
+	
+
+	assessment = state.get("prompt_assessment")
+
 	final = FinalAnswer(
 		status="ok",
-		message="Request passed intake triage.",
-		answer="The request passed intake triage, but no downstream execution node is enabled in this test graph yet.",
+		message="Request passed intake triage and prompt assessment.",
+		answer=(
+			"The request passed intake triage and prompt assessment.\n\n"
+			f"Assessment summary:\n"
+			f"- needs_rewrite: {getattr(assessment, 'needs_rewrite', None)}\n"
+			f"- rewrite_would_help: {getattr(assessment, 'rewrite_would_help', None)}\n"
+			f"- executable_as_is: {getattr(assessment, 'executable_as_is', None)}\n"
+			f"- complexity: {getattr(assessment, 'complexity', None)}\n"
+			f"- requires_planning: {getattr(assessment, 'requires_planning', None)}\n"
+			f"- task_type: {getattr(assessment, 'task_type', None)}\n"
+			f"- suggested_worker: {getattr(assessment, 'suggested_worker', None)}\n"
+			f"- missing_details: {getattr(assessment, 'missing_details', None)}\n"
+			f"- ambiguities: {getattr(assessment, 'ambiguities', None)}\n"
+			f"- rewrite_goal: {getattr(assessment, 'rewrite_goal', None)}\n"
+			f"- reasoning_summary: {getattr(assessment, 'reasoning_summary', None)}"
+		),
 		citations=[],
 		artifacts=[],
-		debug={},
+		debug={
+			"prompt_assessment": assessment.model_dump() if assessment else None,
+		},
 	)
 	return {"final_answer": final, "status": "done"}
+	
+	

@@ -12,10 +12,10 @@ from typing_extensions import TypedDict
 from .schemas import FinalAnswer
 from .schemas import PreparedAsset
 from .schemas import IntakeDecision
+from .schemas import PromptAssessment
 #from .schemas import ApprovalDecision
 #from .schemas import DomainDecision
 #from .schemas import OptimizedPrompt
-#from .schemas import PromptAssessment
 #from .schemas import StepResult
 #from .schemas import TaskPlan
 
@@ -43,9 +43,9 @@ class GraphState(TypedDict, total=False):
 	
 	attachment_errors: list[dict[str, Any]]
 	
+	prompt_assessment: PromptAssessment | None
+	
 	#domain_decision: DomainDecision
-
-	#prompt_assessment: PromptAssessment
 	#optimized_prompt: OptimizedPrompt
 	#approval_iterations: int
 	#max_approval_iterations: int
@@ -59,10 +59,12 @@ class GraphState(TypedDict, total=False):
 	route_reason: str
 	status: Literal[
 		"running",
+		"invalid_attachments",
 		"blocked_language",
 		"blocked_pii",
 		"blocked_domain",
 		"blocked_intake",
+		"needs_rewrite",
 		"awaiting_approval",
 		"rejected_after_iterations",
 		"done",

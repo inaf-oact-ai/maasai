@@ -12,8 +12,8 @@ from langchain.agents import create_agent
 # - MAASAI MODULES
 from .model_router import ModelRouter
 from .schemas import IntakeDecision
+from .schemas import PromptAssessment
 #from .schemas import DomainDecision
-#from .schemas import PromptAssessment
 #from .schemas import OptimizedPrompt
 #from .schemas import TaskPlan
 from .tools import AstronomyToolRegistry
@@ -40,8 +40,8 @@ class AgentFactory:
 			tools=[],
 			response_format=IntakeDecision,
 			system_prompt=(
-				"You are the MAASAI system intake gate. "
-				"You must decide whether the user request is acceptable according to these requirements: \n"
+				"You are the MAASAI system intake gate agent. "
+				"Your role is to decide whether the user request is acceptable according to these requirements: \n"
 				"- Accept only English requests about astronomy, astrophysics, scientific analysis, or astronomical data analysis. \n"
 				"- Reject if personal identifiable information (PII) is present. \n"
 				"- Reject if the provided input data (if any) do not belong to the astronomy domain, e.g. an image or a table with non-astronomical content. \n"
@@ -49,6 +49,46 @@ class AgentFactory:
 			),
 		)
 	
+		# - Prompt assessment agent (eval/analyze user request)
+		self.assessment_agent = create_agent(
+			model=router.get_llm(
+				stage="prompt_assessment",
+				tool_required=False,
+				structured_output_required=True,
+				temperature=0.0,
+			),
+			tools=[],
+			response_format=PromptAssessment,
+			system_prompt=(
+				"You are the MAASAI prompt assessment agent.\n"
+				"Your role is to evaluate an already accepted astronomy/astrophysics user request "
+				"and decide how ready it is for downstream execution.\n\n"
+
+				"Important distinctions:\n"
+				"- needs_rewrite = True only if the request is too underspecified, ambiguous, "
+				"or poorly formed to proceed reliably.\n"
+				"- rewrite_would_help = True if the request is understandable and executable, "
+				"but could benefit from normalization into a clearer or more operational task specification.\n"
+				"- executable_as_is = True if a useful answer or downstream action can already be produced.\n\n"
+
+				"Assess:\n"
+				"- whether rewrite is required\n"
+				"- whether rewrite would help\n"
+				"- whether the task is executable as-is\n"
+				"- complexity\n"
+				"- whether explicit planning is required\n"
+				"- task type\n"
+				"- suggested downstream worker\n"
+				"- missing details\n"
+				"- ambiguities\n"
+				"- rewrite goal, if any\n"
+				"- a concise reasoning summary\n\n"
+
+				"Do not reject requests for safety, language, or domain reasons; intake triage already handled that.\n"
+				"Return only the structured assessment."
+			)
+		)
+
 		#self.domain_agent = create_agent(
 		#	model=router.pick(stage="domain"),
 		#	tools=[],
@@ -56,16 +96,6 @@ class AgentFactory:
 		#	system_prompt=(
 		#		"Decide whether the request belongs to astronomy or scientific analysis. "
 		#		"Return allowed=false when it is clearly out of scope."
-		#	),
-		#)
-
-		#self.assessment_agent = create_agent(
-		#	model=router.pick(stage="assessment"),
-		#	tools=[],
-		#	response_format=PromptAssessment,
-		#	system_prompt=(
-		#		"Assess whether the request is specific enough for execution. "
-		#		"Use complexity='complex' when the task needs multi-step planning."
 		#	),
 		#)
 

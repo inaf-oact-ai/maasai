@@ -162,6 +162,10 @@ class ModelRouter:
 	) -> CapabilityRequirements:
 		prefer_local = stage in self._preferred_local_stages()
 		allow_commercial = stage in self._commercial_allowed_stages() or not prefer_local
+		logger.info(f"router::_build_requirements(): stage={stage}, allow_commercial={allow_commercial}")
+		print("self._preferred_local_stages()")
+		print(self._preferred_local_stages())
+		
 		return CapabilityRequirements(
 			tool_required=tool_required,
 			structured_output_required=structured_output_required,
@@ -184,6 +188,8 @@ class ModelRouter:
 			tool_required=tool_required,
 			structured_output_required=structured_output_required,
 		)
+		print("router::pick_alias(): req")
+		print(req)
 
 		candidates: list[str] = []
 
@@ -192,12 +198,18 @@ class ModelRouter:
 			candidates.append(override)
 
 		stage_default = self._stage_default_alias(stage)
+		
 		candidates.append(stage_default)
 
 		candidates.extend(self._stage_fallback_aliases(stage))
 
 		default_alias = self.routing_policy.get("default_alias", "model-small")
+		logger.info(f"router::pick_alias(): stage_default={stage_default}, default_alias={default_alias}")
+		
 		candidates.append(default_alias)
+		
+		print("router::pick_alias(): candidates")
+		print(candidates)
 
 		seen: set[str] = set()
 		ordered_candidates = [c for c in candidates if c and not (c in seen or seen.add(c))]
@@ -237,6 +249,7 @@ class ModelRouter:
 			tool_required=tool_required,
 			structured_output_required=structured_output_required,
 		)
+		logger.info(f"router::get_llm(): stage={stage}, complexity={complexity}, alias={alias}")
 
 		final_temperature = self.default_temperature if temperature is None else temperature
 		final_max_tokens = self.default_max_tokens if max_tokens is None else max_tokens

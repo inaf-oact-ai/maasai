@@ -32,7 +32,86 @@ class IntakeDecision(BaseModel):
 	images_astronomy_ok: bool = True
 	reason: str
 	normalized_text: str
-	#prepared_assets: list[PreparedAsset] = Field(default_factory=list)
+
+
+class PromptAssessment(BaseModel):
+	"""Assessment of whether a user request is ready for downstream execution."""
+
+	needs_rewrite: bool = Field(
+		...,
+		description=(
+			"True only when the request is not sufficiently actionable or specific "
+			"to proceed reliably to downstream execution."
+		),
+	)
+
+	rewrite_would_help: bool = Field(
+		...,
+		description=(
+			"True when the request is understandable and executable, but a rewrite "
+			"would improve clarity, scientific grounding, or execution-readiness."
+		),
+	)
+
+	executable_as_is: bool = Field(
+		...,
+		description=(
+			"Whether the request can be handled directly in its current form."
+		),
+	)
+
+	complexity: Literal["simple", "moderate", "complex"] = Field(
+		...,
+		description="Estimated execution complexity of the request.",
+	)
+
+	requires_planning: bool = Field(
+		...,
+		description=(
+			"Whether the task likely needs explicit multi-step planning rather than direct execution."
+		),
+	)
+
+	task_type: str = Field(
+		...,
+		description=(
+			"High-level category of task, e.g. explanation, coding, image-analysis, "
+			"catalog-query, literature-review, workflow-design."
+		),
+	)
+
+	suggested_worker: str | None = Field(
+		default=None,
+		description=(
+			"Suggested downstream worker, e.g. general, image, catalog, literature."
+		),
+	)
+
+	missing_details: list[str] = Field(
+		default_factory=list,
+		description=(
+			"Important missing details that should ideally be provided before or during execution."
+		),
+	)
+
+	ambiguities: list[str] = Field(
+		default_factory=list,
+		description=(
+			"Non-blocking ambiguities or underspecified aspects of the request."
+		),
+	)
+
+	rewrite_goal: str | None = Field(
+		default=None,
+		description=(
+			"If a rewrite is useful or required, describe what the rewrite should achieve."
+		),
+	)
+
+	reasoning_summary: str = Field(
+		...,
+		description="Short explanation of the assessment."
+	)
 		
 #class RAGDocument(BaseModel):
 #	doctype: str | None = None
