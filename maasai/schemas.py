@@ -112,7 +112,54 @@ class PromptAssessment(BaseModel):
 		...,
 		description="Short explanation of the assessment."
 	)
-		
+	
+class OptimizedPrompt(BaseModel):
+	"""Rewritten prompt ready for downstream execution."""
+
+	rewritten_prompt: str = Field(
+		...,
+		description="A clearer, more operational rewrite of the original request.",
+	)
+
+	assumptions: list[str] = Field(
+		default_factory=list,
+		description=(
+			"Explicit assumptions introduced to make the request executable "
+			"without inventing facts."
+		),
+	)
+
+	open_questions: list[str] = Field(
+		default_factory=list,
+		description=(
+			"Questions that remain unresolved and may still need user clarification."
+		),
+	)
+
+	rationale: str = Field(
+		...,
+		description="Short explanation of why this rewrite is better for execution.",
+	)
+	
+class ApprovalDecision(BaseModel):
+	"""Human approval decision for an optimized prompt."""
+
+	decision: Literal["approve", "revise", "reject"] = Field(
+		...,
+		description=(
+			"User decision on the rewritten prompt. "
+			"approve means continue execution; revise means rewrite again using feedback; "
+			"reject means stop the workflow."
+		),
+	)
+
+	feedback: str | None = Field(
+		default=None,
+		description=(
+			"Optional user feedback. Required or strongly recommended when decision is revise."
+		),
+	)
+			
 #class RAGDocument(BaseModel):
 #	doctype: str | None = None
 #	title: str | None = None
@@ -121,16 +168,6 @@ class PromptAssessment(BaseModel):
 #	source_id: str | None = None
 #	metadata: dict[str, Any] = Field(default_factory=dict)
 
-#class OptimizedPrompt(BaseModel):
-#	rewritten_prompt: str
-#	assumptions: list[str] = Field(default_factory=list)
-#	rationale: str = ""
-#	retrieved_context_ids: list[str] = Field(default_factory=list)
-
-
-#class ApprovalDecision(BaseModel):
-#	decision: Literal["approve", "revise", "reject"]
-#	feedback: str | None = None
 
 
 #class PlanStep(BaseModel):

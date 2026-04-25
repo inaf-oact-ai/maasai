@@ -87,6 +87,87 @@ def print_interrupt(payload: dict) -> None:
 	print(json.dumps(payload, indent=2))
 	print("=================\n")
 
+def print_approval_interrupt(payload: dict) -> None:
+	print("\n=== PROMPT APPROVAL REQUIRED ===")
+
+	candidate_prompt = payload.get("candidate_prompt")
+	assumptions = payload.get("assumptions", [])
+	open_questions = payload.get("open_questions", [])
+	rationale = payload.get("rationale")
+	iteration = payload.get("iteration")
+	max_iterations = payload.get("max_iterations")
+	instructions = payload.get("instructions")
+
+	print(f"\nIteration: {iteration}/{max_iterations}")
+
+	if instructions:
+		print("\nInstructions:")
+		print(instructions)
+
+	print("\n--- Candidate Prompt ---")
+	print(candidate_prompt or "<empty>")
+
+	print("\n--- Assumptions ---")
+	if assumptions:
+		for item in assumptions:
+			print(f"- {item}")
+	else:
+		print("- none")
+
+	print("\n--- Open Questions ---")
+	if open_questions:
+		for item in open_questions:
+			print(f"- {item}")
+	else:
+		print("- none")
+
+	if rationale:
+		print("\n--- Rationale ---")
+		print(rationale)
+
+	assessment = payload.get("assessment")
+	if assessment:
+		print("\n--- Assessment Summary ---")
+		print(f"needs_rewrite: {assessment.get('needs_rewrite')}")
+		print(f"rewrite_would_help: {assessment.get('rewrite_would_help')}")
+		print(f"executable_as_is: {assessment.get('executable_as_is')}")
+		print(f"complexity: {assessment.get('complexity')}")
+		print(f"requires_planning: {assessment.get('requires_planning')}")
+		print(f"task_type: {assessment.get('task_type')}")
+		print(f"suggested_worker: {assessment.get('suggested_worker')}")
+
+def ask_approval_decision() -> dict:
+	while True:
+		print("\nChoose an action:")
+		print("  [a] approve")
+		print("  [r] revise")
+		print("  [x] reject")
+
+		choice = input("> ").strip().lower()
+
+		if choice in {"a", "approve"}:
+			return {
+				"decision": "approve",
+				"feedback": None,
+			}
+
+		if choice in {"r", "revise"}:
+			feedback = input("Revision feedback: ").strip()
+			if not feedback:
+				feedback = "Please improve clarity and specificity."
+			return {
+				"decision": "revise",
+				"feedback": feedback,
+			}
+
+		if choice in {"x", "reject"}:
+			feedback = input("Optional rejection reason: ").strip()
+			return {
+				"decision": "reject",
+				"feedback": feedback or None,
+			}
+
+		print("Invalid choice. Please enter a, r, or x.")
 
 ###########################
 ##   AGENT GRAPH METHODS
@@ -181,7 +262,31 @@ def build_runtime(args):
 	
 	return graph
 
+def invoke_with_cli_approval(graph, initial_input: dict, config: dict):
+	result = graph.invoke(initial_input, config=config)
 
+	while "__interrupt__" in result:
+		interrupts = result["__interrupt__"]
+		if not interrupts:
+			break
+
+		payload = interrupts[0].value
+	
+		if payload.get("type") != "prompt_approval":
+			print("\n=== UNKNOWN INTERRUPT ===")
+			print(payload)
+			return result
+
+		print_approval_interrupt(payload)
+		resume_payload = ask_approval_decision()
+
+		result = graph.invoke(
+			Command(resume=resume_payload),
+			config=config,
+		)
+
+	return result
+	
 def run_graph(
 	graph,
 	query: str, 
@@ -205,21 +310,26 @@ def run_graph(
 	print("initial_state")
 	print(initial_state)
 	
-	# - Invoke graph
+	# - Invoke graph with approval
 	logger.info(f"Run user query: {query} ...")
-	result = graph.invoke(initial_state, config=config)
+	#result = graph.invoke(initial_state, config=config)
+	result = invoke_with_cli_approval(
+		graph=graph,
+		initial_input=initial_state,
+		config=config,
+	)
 	
 	# - Get response
-	if "__interrupt__" in result:
-		logger.info("Interrupt in result ...")
-		payload = result["__interrupt__"][0].value
-		print_interrupt(payload)
-		resume = {
-			"decision": "approve",
-			"feedback": None,
-		}
-		logger.info("Invoke graph with resume ...")
-		result = graph.invoke(Command(resume=resume), config=config)
+	#if "__interrupt__" in result:
+	#	logger.info("Interrupt in result ...")
+	#	payload = result["__interrupt__"][0].value
+	#	print_interrupt(payload)
+	#	resume = {
+	#		"decision": "approve",
+	#		"feedback": None,
+	#	}
+	#	logger.info("Invoke graph with resume ...")
+	#	result = graph.invoke(Command(resume=resume), config=config)
 
 	final = result.get("final_answer")
 	print("final")

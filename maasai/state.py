@@ -13,9 +13,10 @@ from .schemas import FinalAnswer
 from .schemas import PreparedAsset
 from .schemas import IntakeDecision
 from .schemas import PromptAssessment
-#from .schemas import ApprovalDecision
+from .schemas import OptimizedPrompt
+from .schemas import ApprovalDecision
 #from .schemas import DomainDecision
-#from .schemas import OptimizedPrompt
+
 #from .schemas import StepResult
 #from .schemas import TaskPlan
 
@@ -44,14 +45,13 @@ class GraphState(TypedDict, total=False):
 	attachment_errors: list[dict[str, Any]]
 	
 	prompt_assessment: PromptAssessment | None
+	optimized_prompt: OptimizedPrompt | None
+	approval_decision: ApprovalDecision | None
+	approval_iterations: int
+	max_approval_iterations: int
+	approved_prompt: str | None
 	
 	#domain_decision: DomainDecision
-	#optimized_prompt: OptimizedPrompt
-	#approval_iterations: int
-	#max_approval_iterations: int
-	#approval_decision: ApprovalDecision
-	#approved_prompt: str
-
 	#task_plan: TaskPlan
 	#execution_results: list[StepResult]
 	final_answer: FinalAnswer | None
@@ -66,6 +66,9 @@ class GraphState(TypedDict, total=False):
 		"blocked_intake",
 		"needs_rewrite",
 		"awaiting_approval",
+		"approved",
 		"rejected_after_iterations",
+		"rejected_by_user",
 		"done",
 	]
+	

@@ -21,6 +21,7 @@ from PIL import Image
 
 # - MAASAI MODULES
 from .schemas import PreparedAsset
+from .context import NodeContext
 from maasai import logger
 
 ##################################################

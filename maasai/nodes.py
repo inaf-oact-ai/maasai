@@ -21,8 +21,11 @@ from .assets import _prepare_asset, _asset_field
 from .schemas import FinalAnswer
 from .schemas import PreparedAsset
 from .schemas import PromptAssessment
-#from .schemas import ApprovalDecision, DomainDecision, FinalAnswer, OptimizedPrompt, PlanStep, PromptAssessment, StepResult, TaskPlan
+from .schemas import OptimizedPrompt
+from .schemas import ApprovalDecision
+#from .schemas import DomainDecision, PlanStep, StepResult, TaskPlan
 from .state import GraphState
+from .context import NodeContext
 from maasai import logger
 
 ##################################################
@@ -41,6 +44,30 @@ def _extract_text(messages: list[Any]) -> str:
 					chunks.append(str(item.get("text", "")))
 	return "\n".join(part for part in chunks if part).strip()
 
+def _strip_rewrite_metadata_sections(text: str) -> str:
+	"""Remove duplicated metadata sections from rewritten_prompt."""
+	if not text:
+		return text
+
+	markers = [
+		"\n**Assumptions**:",
+		"\nAssumptions:",
+		"\n**Open Questions**:",
+		"\nOpen Questions:",
+		"\n**Rationale**:",
+		"\nRationale:",
+	]
+
+	cut_positions = [
+		text.find(marker)
+		for marker in markers
+		if text.find(marker) != -1
+	]
+
+	if not cut_positions:
+		return text.strip()
+
+	return text[:min(cut_positions)].strip()
 
 #def _invoke_with_timeout(agent, payload, timeout_s: float):
 #	with ThreadPoolExecutor(max_workers=1) as executor:
@@ -178,21 +205,91 @@ def _build_assessment_prompt(
 
 	return "\n".join(lines)
 
+def _build_rewrite_prompt(
+	raw_user_text: str,
+	assessment: PromptAssessment,
+	prepared_assets: list[Any] | None = None,
+) -> str:
+	"""Create prompt for rewrite agent."""
+	prepared_assets = prepared_assets or []
+
+	lines = [
+		"ORIGINAL USER REQUEST:",
+		raw_user_text or "<empty>",
+		"",
+		"ASSESSMENT SUMMARY:",
+		f"- needs_rewrite: {assessment.needs_rewrite}",
+		f"- rewrite_would_help: {assessment.rewrite_would_help}",
+		f"- executable_as_is: {assessment.executable_as_is}",
+		f"- complexity: {assessment.complexity}",
+		f"- requires_planning: {assessment.requires_planning}",
+		f"- task_type: {assessment.task_type}",
+		f"- suggested_worker: {assessment.suggested_worker}",
+		f"- missing_details: {assessment.missing_details}",
+		f"- ambiguities: {assessment.ambiguities}",
+		f"- rewrite_goal: {assessment.rewrite_goal}",
+	]
+
+	if prepared_assets:
+		lines.extend([
+			"",
+			"ATTACHMENTS:",
+		])
+		for idx, asset in enumerate(prepared_assets, start=1):
+			lines.append(f"- Asset {idx}:")
+			lines.append(f"  kind: {_asset_field(asset, 'kind', 'unknown')}")
+			lines.append(f"  path: {_asset_field(asset, 'path', '')}")
+			notes = _asset_field(asset, "notes", [])
+			if notes:
+				lines.append(f"  notes: {notes}")
+	else:
+		lines.extend([
+			"",
+			"ATTACHMENTS: none",
+		])
+
+	lines.extend([
+		"",
+		"REWRITE INSTRUCTIONS:",
+		"- Rewrite the original request into a clearer execution-ready task.",
+		"- Preserve the user's intent.",
+		"- Do not invent unavailable data or facts.",
+		"- If assumptions are needed, make them explicit in the assumptions field.",
+		"- If unresolved issues remain, include them in open_questions.",
+		"- Do not include assumptions inside rewritten_prompt; use the assumptions field.",
+		"- Do not include open questions inside rewritten_prompt; use the open_questions field.",
+		"- rewritten_prompt must be a clean task specification only.",
+		"- The rewritten prompt should be suitable for downstream planning or direct execution.",
+	])
+
+	return "\n".join(lines)
+
+
+def _default_optimized_prompt_from_state(state: GraphState) -> OptimizedPrompt:
+	"""Create a default optimized prompt when no rewrite was needed."""
+	raw_user_text = state.get("raw_user_text", "")
+
+	return OptimizedPrompt(
+		rewritten_prompt=raw_user_text,
+		assumptions=[],
+		open_questions=[],
+		rationale="Prompt was assessed as executable without rewrite.",
+	)
+
 ##################################################
 ###          GRAPH NODES
 ##################################################
-class NodeContext:
-	def __init__(
-		self, *, 
-		settings: Settings, 
-		rag: PromptRAG, 
-		agents: AgentFactory
-	) -> None:
-		""" Node context """
-		self.settings = settings
-		self.rag = rag
-		self.agents = agents
-
+#class NodeContext:
+#	def __init__(
+#		self, *, 
+#		settings: Settings, 
+#		rag: PromptRAG, 
+#		agents: AgentFactory
+#	) -> None:
+#		""" Node context """
+#		self.settings = settings
+#		self.rag = rag
+#		self.agents = agents
 
 
 def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
@@ -421,121 +518,162 @@ def assess_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	}
 
 
-#def normalize_input(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	_ = ctx
-#	messages = state.get("messages", [])
-#	raw_user_text = _extract_text(messages)
-#	multimodal = any(isinstance(getattr(m, "content", None), list) for m in messages)
-#	return {
-#		"raw_user_text": raw_user_text,
-#		"multimodal": multimodal,
-#		"approval_iterations": state.get("approval_iterations", 0),
-#		"max_approval_iterations": state.get("max_approval_iterations", ctx.settings.workflow.max_approval_iterations),
-#		"status": "running",
-#	}
+def rewrite_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Rewrite an underspecified but accepted request into a clearer execution-ready prompt."""
+	raw_user_text = state.get("raw_user_text", "")
+	prepared_assets = state.get("prepared_assets", [])
+	assessment: PromptAssessment | None = state.get("prompt_assessment")
+
+	if assessment is None:
+		return {
+			"status": "blocked_intake",
+			"route_reason": "Cannot rewrite prompt because prompt assessment is missing.",
+			"intake_reason": "Missing prompt assessment before rewrite.",
+		}
+
+	rewrite_request = _build_rewrite_prompt(
+		raw_user_text=raw_user_text,
+		assessment=assessment,
+		prepared_assets=prepared_assets,
+	)
+
+	logger.info("--> rewrite_prompt(): invoking optimizer_agent ...")
+
+	response = ctx.agents.optimizer_agent.invoke({
+		"messages": [HumanMessage(content=rewrite_request)]
+	})
+	optimized: OptimizedPrompt = response["structured_response"]
+
+	logger.info(
+		"---> rewrite_prompt(): "
+		f"rewritten_prompt={optimized.rewritten_prompt!r}, "
+		f"assumptions={optimized.assumptions}, "
+		f"open_questions={optimized.open_questions}"
+	)
+
+	return {
+		"optimized_prompt": optimized,
+		"status": "running",
+	}
 
 
-#def language_gate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	text = state["raw_user_text"]
-#	ok = True if not ctx.settings.workflow.strict_english_only else is_probably_english(text)
-#	update: dict[str, Any] = {"language_ok": ok}
-#	if not ok:
-#		update["status"] = "blocked_language"
-#		update["route_reason"] = wrap_guardrail_response("The system currently accepts only English requests.")
-#	return update
+def approval_node(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Ask the user to approve, revise, or reject the prompt before execution."""
+	_ = ctx
 
+	candidate = state.get("optimized_prompt")
+	if candidate is None:
+		candidate = _default_optimized_prompt_from_state(state)
 
-#def pii_gate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	text = state["raw_user_text"]
-#	reasons = detect_pii(text)
-#	pii_detected = bool(reasons)
-#	update: dict[str, Any] = {"pii_detected": pii_detected, "pii_reasons": reasons}
-#	if pii_detected and ctx.settings.workflow.pii_policy == "block":
-#		update["status"] = "blocked_pii"
-#		update["route_reason"] = wrap_guardrail_response(
-#			"The request was blocked because it appears to contain personally identifiable information."
-#		)
-#	return update
+	assessment = state.get("prompt_assessment")
 
+	decision_payload = interrupt({
+		"type": "prompt_approval",
+		"candidate_prompt": candidate.rewritten_prompt,
+		"assumptions": candidate.assumptions,
+		"open_questions": candidate.open_questions,
+		"rationale": candidate.rationale,
+		"assessment": assessment.model_dump() if assessment else None,
+		"iteration": state.get("approval_iterations", 0),
+		"max_iterations": state.get("max_approval_iterations", 3),
+		"instructions": (
+			"Approve the rewritten prompt to continue, request revision with feedback, "
+			"or reject to stop the workflow."
+		),
+	})
 
-#def domain_affinity(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	text = state["raw_user_text"]
-#	if is_scientific_or_astronomy_related(text):
-#		decision = ctx.agents.domain_agent.invoke({"messages": [HumanMessage(content=text)]})["structured_response"]
-#	else:
-#		decision = DomainDecision(allowed=False, confidence=0.99, reason="Not astronomy/science related.", topic=None)
-#	update: dict[str, Any] = {"domain_decision": decision}
-#	if not decision.allowed:
-#		update["status"] = "blocked_domain"
-#		update["route_reason"] = wrap_guardrail_response(decision.reason)
-#	return update
+	decision = ApprovalDecision.model_validate(decision_payload)
 
+	update: dict[str, Any] = {
+		"approval_decision": decision,
+		"approval_iterations": state.get("approval_iterations", 0) + 1,
+	}
 
+	if decision.decision == "approve":
+		update["approved_prompt"] = candidate.rewritten_prompt
+		update["status"] = "approved"
+	elif decision.decision == "revise":
+		update["status"] = "awaiting_approval"
+	else:
+		update["status"] = "rejected_by_user"
 
-#def rewrite_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	assessment: PromptAssessment = state["prompt_assessment"]
-#	docs = ctx.rag.retrieve(state["raw_user_text"], k=5)
-#	context_blob = "\n\n".join(f"[{doc.doc_id}] {doc.title}\n{doc.text}" for doc in docs)
-#	request = (
-#		f"Original request:\n{state['raw_user_text']}\n\n"
-#		f"Missing details: {assessment.missing_details}\n\n"
-#		f"Retrieved optimization context:\n{context_blob or 'No context retrieved.'}"
-#	)
-#	optimized = ctx.agents.optimizer_agent.invoke({
-#		"messages": [HumanMessage(content=request)]
-#	})["structured_response"]
-#	return {"optimized_prompt": optimized}
+	return update
 
+def refine_from_feedback(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Revise the optimized prompt using user feedback."""
+	decision = state.get("approval_decision")
+	candidate = state.get("optimized_prompt")
+	raw_user_text = state.get("raw_user_text", "")
+	assessment = state.get("prompt_assessment")
 
-#def approval_node(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	_ = ctx
-#	candidate = state.get("optimized_prompt") or OptimizedPrompt(
-#		rewritten_prompt=state["raw_user_text"],
-#		assumptions=[],
-#		rationale="Prompt was already specific enough.",
-#		retrieved_context_ids=[],
-#	)
-#	decision_payload = interrupt({
-#		"type": "prompt_approval",
-#		"candidate_prompt": candidate.rewritten_prompt,
-#		"assumptions": candidate.assumptions,
-#		"rationale": candidate.rationale,
-#		"iteration": state.get("approval_iterations", 0),
-#		"max_iterations": state.get("max_approval_iterations", 3),
-#	})
-#	decision = ApprovalDecision.model_validate(decision_payload)
-#	return {
-#		"approval_decision": decision,
-#		"approval_iterations": state.get("approval_iterations", 0) + 1,
-#		"status": "awaiting_approval",
-#	}
+	base_prompt = candidate.rewritten_prompt if candidate else raw_user_text
+	feedback_text = (
+		decision.feedback
+		if decision and decision.feedback
+		else "Please improve clarity, specificity, and execution-readiness."
+	)
 
+	lines = [
+		"ORIGINAL USER REQUEST:",
+		raw_user_text or "<empty>",
+		"",
+		"CURRENT REWRITTEN PROMPT:",
+		base_prompt or "<empty>",
+		"",
+		"USER FEEDBACK:",
+		feedback_text,
+	]
 
-#def refine_from_feedback(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	decision = state["approval_decision"]
-#	candidate = state.get("optimized_prompt")
-#	base_text = candidate.rewritten_prompt if candidate else state["raw_user_text"]
-#	feedback_text = decision.feedback or "Please improve clarity and specificity."
-#	request = (
-#		f"Current rewritten prompt:\n{base_text}\n\n"
-#		f"User feedback:\n{feedback_text}\n\n"
-#		"Produce a revised version."
-#	)
-#	optimized = ctx.agents.optimizer_agent.invoke({
-#		"messages": [HumanMessage(content=request)]
-#	})["structured_response"]
-#	return {"optimized_prompt": optimized, "status": "running"}
+	if assessment is not None:
+		lines.extend([
+			"",
+			"ASSESSMENT CONTEXT:",
+			f"- missing_details: {assessment.missing_details}",
+			f"- ambiguities: {assessment.ambiguities}",
+			f"- rewrite_goal: {assessment.rewrite_goal}",
+		])
 
+	lines.extend([
+		"",
+		"REVISION INSTRUCTIONS:",
+		"- Revise the prompt according to the user feedback.",
+		"- Preserve the original scientific intent.",
+		"- Do not invent unavailable data or facts.",
+		"- Keep assumptions only in the assumptions field.",
+		"- Keep unresolved questions only in the open_questions field.",
+	])
 
-#def give_up(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	_ = ctx
-#	return {
-#		"status": "rejected_after_iterations",
-#		"route_reason": wrap_guardrail_response(
-#			"The system could not converge on an approved prompt within the allowed number of iterations."
-#		),
-#	}
+	logger.info("--> refine_from_feedback(): invoking optimizer_agent ...")
 
+	response = ctx.agents.optimizer_agent.invoke({
+		"messages": [HumanMessage(content="\n".join(lines))]
+	})
+	optimized: OptimizedPrompt = response["structured_response"]
+
+	optimized = optimized.model_copy(
+		update={
+			"rewritten_prompt": _strip_rewrite_metadata_sections(
+				optimized.rewritten_prompt
+			)
+		}
+	)
+
+	return {
+		"optimized_prompt": optimized,
+		"status": "running",
+	}
+
+def give_up(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Stop when approval/rewrite loop cannot converge."""
+	_ = ctx
+
+	return {
+		"status": "rejected_after_iterations",
+		"route_reason": wrap_guardrail_response(
+			"The system could not converge on an approved prompt within the allowed number of iterations."
+		),
+	}
+	
 
 #def prepare_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 #	_ = ctx
@@ -735,6 +873,79 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		)
 		return {"final_answer": final, "status": "done"}
 
+	# - Request re-written
+	if status == "running" and state.get("optimized_prompt") is not None:
+		optimized = state.get("optimized_prompt")
+
+		final = FinalAnswer(
+			status="ok",
+			message="Request passed intake triage, was assessed, and has been rewritten for execution.",
+			answer=(
+				"The request was accepted, assessed as needing rewrite, and rewritten into a more execution-ready form.\n\n"
+				f"Rewritten prompt:\n{getattr(optimized, 'rewritten_prompt', None)}\n\n"
+				f"Assumptions: {getattr(optimized, 'assumptions', None)}\n"
+				f"Open questions: {getattr(optimized, 'open_questions', None)}\n"
+				f"Rationale: {getattr(optimized, 'rationale', None)}"
+			),
+			citations=[],
+			artifacts=[],
+			debug={
+				"optimized_prompt": optimized.model_dump() if optimized else None,
+				"prompt_assessment": (
+					state.get("prompt_assessment").model_dump()
+					if state.get("prompt_assessment") else None
+				),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+
+
+	# - Approved prompt re-write
+	if status == "approved":
+		final = FinalAnswer(
+			status="ok",
+			message="Prompt approved for downstream execution.",
+			answer=(
+				"The prompt has been approved and is ready for downstream execution.\n\n"
+				f"Approved prompt:\n{state.get('approved_prompt')}"
+			),
+			citations=[],
+			artifacts=[],
+			debug={
+				"approved_prompt": state.get("approved_prompt"),
+				"approval_decision": (
+					state.get("approval_decision").model_dump()
+					if state.get("approval_decision") else None
+				),
+				"optimized_prompt": (
+					state.get("optimized_prompt").model_dump()
+					if state.get("optimized_prompt") else None
+				),
+				"prompt_assessment": (
+					state.get("prompt_assessment").model_dump()
+					if state.get("prompt_assessment") else None
+				),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+
+	# - Rejected prompt re-write
+	if status == "rejected_by_user":
+		final = FinalAnswer(
+			status="rejected",
+			message="Prompt approval was rejected by the user.",
+			answer=None,
+			citations=[],
+			artifacts=[],
+			debug={
+				"approval_decision": (
+					state.get("approval_decision").model_dump()
+					if state.get("approval_decision") else None
+				),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+		
 	#######################################
 	##      SUCCESS
 	#######################################

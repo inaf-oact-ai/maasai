@@ -18,28 +18,21 @@ from .nodes import NodeContext
 from .nodes import intake_triage
 from .nodes import assess_prompt
 from .nodes import final_guardrail
+from .nodes import rewrite_prompt
+from .nodes import approval_node
+from .nodes import refine_from_feedback
+from .nodes import give_up
+
 #from .nodes import (
-#	NodeContext,
 #	aggregate,
-#	approval_node,
-#	assess_prompt,
-#	domain_affinity,
 #	execute_plan,
-#	final_guardrail,
-#	give_up,
-#	language_gate,
-#	normalize_input,
-#	pii_gate,
 #	planner_or_default,
-#	prepare_prompt,
-#	refine_from_feedback,
-#	rewrite_prompt,
 #)
 from .rag import PromptRAG
 from .state import GraphState
 from .tools import AstronomyToolRegistry
 from .model_router import ModelRouter
-
+from .context import NodeContext
 from maasai import logger
 
 ##################################################
@@ -51,33 +44,44 @@ def _after_intake(state: GraphState) -> str:
 		return "assess_prompt"
 	return "final_guardrail"
 
-#def _after_language(state: GraphState) -> str:
-#	return "pii_gate" if state.get("language_ok", False) else "final_guardrail"
-
-#def _after_pii(state: GraphState) -> str:
-#	return "domain_affinity" if not state.get("pii_detected", False) else "final_guardrail"
-
-#def _after_domain(state: GraphState) -> str:
-#	decision = state.get("domain_decision")
-#	return "assess_prompt" if decision and decision.allowed else "final_guardrail"
-
+#def _after_assessment(state: GraphState) -> str:
+#	assessment = state.get("prompt_assessment")
+#	if assessment and assessment.needs_rewrite:
+#		return "rewrite_prompt"
+#	return "final_guardrail"
+	
 def _after_assessment(state: GraphState) -> str:
 	assessment = state.get("prompt_assessment")
 	if assessment and assessment.needs_rewrite:
 		return "rewrite_prompt"
-	return "approval"
+	return "approval"	
 
+#def _after_approval(state: GraphState) -> str:
+#	decision = state.get("approval_decision")
+#	if decision is None:
+#		return "give_up"
+#	if decision.decision == "approve":
+#		return "prepare_prompt"
+#	if decision.decision == "revise":
+#		if state.get("approval_iterations", 0) >= state.get("max_approval_iterations", 3):
+#			return "give_up"
+#		return "refine_from_feedback"
+#	return "give_up"
 
 def _after_approval(state: GraphState) -> str:
 	decision = state.get("approval_decision")
+
 	if decision is None:
 		return "give_up"
+
 	if decision.decision == "approve":
-		return "prepare_prompt"
+		return "final_guardrail"
+
 	if decision.decision == "revise":
 		if state.get("approval_iterations", 0) >= state.get("max_approval_iterations", 3):
 			return "give_up"
 		return "refine_from_feedback"
+
 	return "give_up"
 
 ##################################################
@@ -112,17 +116,13 @@ def build_graph(
 	# - Create nodes
 	logger.info("Creating nodes ...")
 	builder.add_node("intake_triage", partial(intake_triage, ctx=ctx))
-	##builder.add_node("normalize_input", partial(normalize_input, ctx=ctx))
-	##builder.add_node("language_gate", partial(language_gate, ctx=ctx))
-	##builder.add_node("pii_gate", partial(pii_gate, ctx=ctx))
-	##builder.add_node("domain_affinity", partial(domain_affinity, ctx=ctx))
-	
 	builder.add_node("assess_prompt", partial(assess_prompt, ctx=ctx))
-	#builder.add_node("rewrite_prompt", partial(rewrite_prompt, ctx=ctx))
+	builder.add_node("rewrite_prompt", partial(rewrite_prompt, ctx=ctx))
 	
-	#builder.add_node("approval", partial(approval_node, ctx=ctx))
-	#builder.add_node("refine_from_feedback", partial(refine_from_feedback, ctx=ctx))
-	#builder.add_node("give_up", partial(give_up, ctx=ctx))
+	builder.add_node("approval", partial(approval_node, ctx=ctx))
+	builder.add_node("refine_from_feedback", partial(refine_from_feedback, ctx=ctx))
+	builder.add_node("give_up", partial(give_up, ctx=ctx))
+	
 	#builder.add_node("prepare_prompt", partial(prepare_prompt, ctx=ctx))
 	#builder.add_node("planner_or_default", partial(planner_or_default, ctx=ctx))
 	#builder.add_node("execute_plan", partial(execute_plan, ctx=ctx))
@@ -138,15 +138,49 @@ def build_graph(
 	##########################################
 	
 	############# TEST INTAKE+ASSESS PROMPT ################
+	#builder.add_edge(START, "intake_triage")
+	#builder.add_conditional_edges("intake_triage", _after_intake, {
+	#	"assess_prompt": "assess_prompt",
+	#	"final_guardrail": "final_guardrail",
+	#})
+	#builder.add_edge("assess_prompt", "final_guardrail")
+	#builder.add_edge("final_guardrail", END)
+	#######################################################
+	
+	############# TEST INTAKE+ASSESS+REWRITE PROMPT ################
+	#builder.add_edge(START, "intake_triage")
+	#builder.add_conditional_edges("intake_triage", _after_intake, {
+	#	"assess_prompt": "assess_prompt",
+	#	"final_guardrail": "final_guardrail",
+	#})
+	#builder.add_conditional_edges("assess_prompt", _after_assessment, {
+	#	"rewrite_prompt": "rewrite_prompt",
+	#	"final_guardrail": "final_guardrail",
+	#})
+	#builder.add_edge("rewrite_prompt", "final_guardrail")
+	#builder.add_edge("final_guardrail", END)
+	#######################################################
+
+	############# TEST INTAKE+ASSESS+REWRITE+APPROVAL PROMPT ################
 	builder.add_edge(START, "intake_triage")
 	builder.add_conditional_edges("intake_triage", _after_intake, {
 		"assess_prompt": "assess_prompt",
 		"final_guardrail": "final_guardrail",
 	})
-	builder.add_edge("assess_prompt", "final_guardrail")
+	builder.add_conditional_edges("assess_prompt", _after_assessment, {
+		"rewrite_prompt": "rewrite_prompt",
+		"approval": "approval",
+	})
+	builder.add_edge("rewrite_prompt", "approval")
+	builder.add_conditional_edges("approval", _after_approval, {
+		"final_guardrail": "final_guardrail",
+		"refine_from_feedback": "refine_from_feedback",
+		"give_up": "give_up",
+	})
+	builder.add_edge("refine_from_feedback", "approval")
+	builder.add_edge("give_up", "final_guardrail")
 	builder.add_edge("final_guardrail", END)
-	#######################################################
-	
+	###########################################################################
 
 	####  TO BE REMOVED ###
 	#builder.add_edge(START, "intake_triage")
