@@ -13,9 +13,8 @@ from langchain.agents import create_agent
 from .model_router import ModelRouter
 from .schemas import IntakeDecision
 from .schemas import PromptAssessment
-#from .schemas import DomainDecision
-#from .schemas import OptimizedPrompt
-#from .schemas import TaskPlan
+from .schemas import OptimizedPrompt
+from .schemas import TaskPlan
 from .tools import AstronomyToolRegistry
 
 ##################################################
@@ -89,35 +88,68 @@ class AgentFactory:
 			)
 		)
 
-		#self.domain_agent = create_agent(
-		#	model=router.pick(stage="domain"),
-		#	tools=[],
-		#	response_format=DomainDecision,
-		#	system_prompt=(
-		#		"Decide whether the request belongs to astronomy or scientific analysis. "
-		#		"Return allowed=false when it is clearly out of scope."
-		#	),
-		#)
+		# - Prompt optimizer agent
+		self.optimizer_agent = create_agent(
+			model=router.get_llm(
+				stage="prompt_optimization",
+				tool_required=False,
+				structured_output_required=True,
+				temperature=0.0,
+			),
+			tools=[],
+			response_format=OptimizedPrompt,
+			system_prompt=(
+				"You are the MAASAI prompt rewrite agent. "
+				"Your role is to rewrite an accepted astronomy/astrophysics request "
+				"into a clearer and more operational task specification for downstream execution.\n\n"
 
-		#self.optimizer_agent = create_agent(
-		#	model=router.pick(stage="optimizer"),
-		#	tools=[],
-		#	response_format=OptimizedPrompt,
-		#	system_prompt=(
-		#		"Rewrite the task into a clearer, executable astronomy/science prompt. "
-		#		"Never invent facts. Keep assumptions explicit."
-		#	),
-		#)
+				"Rules:\n"
+				"- Do not invent facts, observations, datasets, or results.\n"
+				"- Preserve the user's scientific intent.\n"
+				"- Use the assessment information to address missing details and ambiguities.\n"
+				"- Keep assumptions explicit, but place them only in the assumptions field.\n"
+				"- Place unresolved issues only in the open_questions field.\n"
+				"- Do not include sections titled 'Assumptions' or 'Open Questions' inside rewritten_prompt.\n"
+				"- rewritten_prompt should contain only the improved execution-ready task request.\n"
+				"- The rewritten prompt should be concise, scientifically meaningful, and suitable for downstream planning or direct execution.\n\n"
 
-		#self.planner_agent = create_agent(
-		#	model=router.pick(stage="planner", complexity="complex"),
-		#	tools=[],
-		#	response_format=TaskPlan,
-		#	system_prompt=(
-		#		"Break the approved prompt into executable astronomy workflow steps. "
-		#		"Keep the plan concise and practical."
-		#	),
-		#)
+				"Return only the structured rewritten prompt."
+			),
+		)
+		
+		# - Task planner agent
+		self.planner_agent = create_agent(
+			model=router.get_llm(
+				stage="planner",
+				tool_required=False,
+				structured_output_required=True,
+				temperature=0.0,
+			),
+			tools=[],
+			response_format=TaskPlan,
+			system_prompt=(
+				"You are the MAASAI task planner. "
+				"Your role is to convert an approved astronomy/astrophysics execution prompt "
+				"into a concrete ordered execution plan.\n\n"
+
+				"Available workers:\n"
+				"- general: conceptual explanations, scientific reasoning, coding guidance, workflow design.\n"
+				"- image: astronomical image/FITS analysis, morphology inspection, image-derived measurements.\n"
+				"- catalog: catalog queries, cross-matching, source metadata, survey table analysis.\n"
+				"- literature: literature search, paper summaries, reference discovery.\n\n"
+
+				"Planning rules:\n"
+				"- Use the fewest steps needed for reliable execution.\n"
+				"- Assign exactly one worker to each step.\n"
+				"- Do not invent unavailable observations, data, or tools.\n"
+				"- Use retrieved planning context only to improve the plan structure, not as final scientific evidence.\n"
+				"- If no data are attached, avoid image/catalog execution steps unless the prompt asks for a workflow involving such data.\n"
+				"- For workflow-design or explanatory tasks, the general worker is often sufficient.\n\n"
+
+				"Return only the structured task plan."
+			),
+		)
+
 
 		#worker_tools = [tools.query_caesar_rest, tools.call_mcp_tool]
 

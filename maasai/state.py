@@ -15,10 +15,8 @@ from .schemas import IntakeDecision
 from .schemas import PromptAssessment
 from .schemas import OptimizedPrompt
 from .schemas import ApprovalDecision
-#from .schemas import DomainDecision
-
-#from .schemas import StepResult
-#from .schemas import TaskPlan
+from .schemas import TaskPlan
+	#from .schemas import StepResult
 
 ##################################################
 ###          GRAPH STATE
@@ -50,9 +48,13 @@ class GraphState(TypedDict, total=False):
 	approval_iterations: int
 	max_approval_iterations: int
 	approved_prompt: str | None
+	execution_prompt: str | None
 	
-	#domain_decision: DomainDecision
-	#task_plan: TaskPlan
+	task_plan: TaskPlan | None
+	planner_rag_enabled: bool
+	planner_rag_context: list[dict[str, str]]
+	planner_rag_k: int
+	
 	#execution_results: list[StepResult]
 	final_answer: FinalAnswer | None
 
@@ -67,6 +69,8 @@ class GraphState(TypedDict, total=False):
 		"needs_rewrite",
 		"awaiting_approval",
 		"approved",
+		"prepared",
+		"planned",
 		"rejected_after_iterations",
 		"rejected_by_user",
 		"done",

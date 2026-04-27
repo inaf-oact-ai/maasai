@@ -70,10 +70,13 @@ def get_args():
 	parser.add_argument('-config_litellm','--config_litellm', dest='config_litellm', required=True, type=str, help='Input yaml config file for LiteLLM') 
 	parser.add_argument("--mode", choices=["cli", "api"], default="cli")
 	parser.add_argument("--thread-id", type=str, default="maasai-thread")
-	
+	parser.add_argument("--enable-planner-rag", action="store_true", help="Enable RAG retrieval for the planner node.")
+	parser.add_argument("--planner-rag-k", type=int, default=5, help="Number of RAG documents to retrieve for planner context.")
+
 	# - API options
 	parser.add_argument("--host", type=str, default="127.0.0.1")
 	parser.add_argument("--port", type=int, default=8000)
+	
 
 	args, _unknown = parser.parse_known_args()
 	
@@ -287,31 +290,37 @@ def invoke_with_cli_approval(graph, initial_input: dict, config: dict):
 
 	return result
 	
-def run_graph(
-	graph,
-	query: str, 
-	attachments: list[dict[str, str]] | None = None,
-	thread_id: str="maasai-thread"
-) -> None:
+def run_graph(graph, args) -> None:
 	""" Helper to run the agentic graph and return the final answer. """
 
+	# - Set input arguments
+	attachments = []
+	if args.input_imgs.strip():
+		for raw_path in args.input_imgs.split(","):
+			path = raw_path.strip()
+			if not path:
+				continue
+			attachments.append({"path": os.path.abspath(path)})
+
 	# - Define config    
-	config = {"configurable": {"thread_id": thread_id}}
+	config = {"configurable": {"thread_id": args.thread_id}}
 
 	# - Define input message    
 	attachments = attachments or []
 	initial_state = {
 		"messages": [
-			HumanMessage(content=query)
+			HumanMessage(content=args.query)
 		],
 		"attachments": attachments,
+		"planner_rag_enabled": getattr(args, "enable_planner_rag", False),
+		"planner_rag_k": getattr(args, "planner_rag_k", 5),
 	}
 	
 	print("initial_state")
 	print(initial_state)
 	
 	# - Invoke graph with approval
-	logger.info(f"Run user query: {query} ...")
+	logger.info(f"Run user query: {args.query} ...")
 	#result = graph.invoke(initial_state, config=config)
 	result = invoke_with_cli_approval(
 		graph=graph,
@@ -319,18 +328,7 @@ def run_graph(
 		config=config,
 	)
 	
-	# - Get response
-	#if "__interrupt__" in result:
-	#	logger.info("Interrupt in result ...")
-	#	payload = result["__interrupt__"][0].value
-	#	print_interrupt(payload)
-	#	resume = {
-	#		"decision": "approve",
-	#		"feedback": None,
-	#	}
-	#	logger.info("Invoke graph with resume ...")
-	#	result = graph.invoke(Command(resume=resume), config=config)
-
+	# - Parse response
 	final = result.get("final_answer")
 	print("final")
 	print(final)
@@ -376,22 +374,11 @@ def run_cli(graph, args):
 		print("Missing --query or empty query in cli mode")
 		return 1
 		
-	# - Set input arguments
-	attachments = []
-	if args.input_imgs.strip():
-		for raw_path in args.input_imgs.split(","):
-			path = raw_path.strip()
-			if not path:
-				continue
-			attachments.append({"path": os.path.abspath(path)})
-
 	# - Run graph
 	logger.info(f"Run graph with user query: {args.query}")
 	return run_graph(
 		graph=graph,
-		query=args.query,
-		attachments=attachments,
-		thread_id="maasai-thread"
+		args=args,
 	)
 	
 ###########################

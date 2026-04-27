@@ -14,7 +14,6 @@ from langgraph.graph import END, START, StateGraph
 # - MAASAI MODULES
 from .agents import AgentFactory
 from .config import Settings
-from .nodes import NodeContext
 from .nodes import intake_triage
 from .nodes import assess_prompt
 from .nodes import final_guardrail
@@ -22,12 +21,10 @@ from .nodes import rewrite_prompt
 from .nodes import approval_node
 from .nodes import refine_from_feedback
 from .nodes import give_up
-
-#from .nodes import (
-#	aggregate,
-#	execute_plan,
-#	planner_or_default,
-#)
+from .nodes import prepare_prompt
+from .nodes import planner_or_default
+#from .nodes import aggregate
+#from .nodes import execute_plan
 from .rag import PromptRAG
 from .state import GraphState
 from .tools import AstronomyToolRegistry
@@ -74,8 +71,11 @@ def _after_approval(state: GraphState) -> str:
 	if decision is None:
 		return "give_up"
 
+	#if decision.decision == "approve":
+	#	return "final_guardrail"
+		
 	if decision.decision == "approve":
-		return "final_guardrail"
+		return "prepare_prompt"
 
 	if decision.decision == "revise":
 		if state.get("approval_iterations", 0) >= state.get("max_approval_iterations", 3):
@@ -87,14 +87,6 @@ def _after_approval(state: GraphState) -> str:
 ##################################################
 ###          GRAPH
 ##################################################
-#def build_graph(settings: Settings | None = None):
-#	settings = settings or Settings()
-#	ctx = NodeContext(
-#		settings=settings,
-#		rag=PromptRAG(),
-#		agents=AgentFactory(ModelRouter(settings.litellm), AstronomyToolRegistry()),
-#	)
-
 def build_graph(
 	agents: AgentFactory,
 	prompt_rag: PromptRAG | None = None,
@@ -122,9 +114,8 @@ def build_graph(
 	builder.add_node("approval", partial(approval_node, ctx=ctx))
 	builder.add_node("refine_from_feedback", partial(refine_from_feedback, ctx=ctx))
 	builder.add_node("give_up", partial(give_up, ctx=ctx))
-	
-	#builder.add_node("prepare_prompt", partial(prepare_prompt, ctx=ctx))
-	#builder.add_node("planner_or_default", partial(planner_or_default, ctx=ctx))
+	builder.add_node("prepare_prompt", partial(prepare_prompt, ctx=ctx))
+	builder.add_node("planner_or_default", partial(planner_or_default, ctx=ctx))
 	#builder.add_node("execute_plan", partial(execute_plan, ctx=ctx))
 	#builder.add_node("aggregate", partial(aggregate, ctx=ctx))
 	builder.add_node("final_guardrail", partial(final_guardrail, ctx=ctx))
@@ -162,6 +153,51 @@ def build_graph(
 	#######################################################
 
 	############# TEST INTAKE+ASSESS+REWRITE+APPROVAL PROMPT ################
+	#builder.add_edge(START, "intake_triage")
+	#builder.add_conditional_edges("intake_triage", _after_intake, {
+	#	"assess_prompt": "assess_prompt",
+	#	"final_guardrail": "final_guardrail",
+	#})
+	#builder.add_conditional_edges("assess_prompt", _after_assessment, {
+	#	"rewrite_prompt": "rewrite_prompt",
+	#	"approval": "approval",
+	#})
+	#builder.add_edge("rewrite_prompt", "approval")
+	#builder.add_conditional_edges("approval", _after_approval, {
+	#	"final_guardrail": "final_guardrail",
+	#	"refine_from_feedback": "refine_from_feedback",
+	#	"give_up": "give_up",
+	#})
+	#builder.add_edge("refine_from_feedback", "approval")
+	#builder.add_edge("give_up", "final_guardrail")
+	#builder.add_edge("final_guardrail", END)
+	###########################################################################
+
+
+	############# TEST INTAKE+ASSESS+REWRITE+APPROVAL+PREPARE PROMPT ################
+	#builder.add_edge(START, "intake_triage")
+	#builder.add_conditional_edges("intake_triage", _after_intake, {
+	#	"assess_prompt": "assess_prompt",
+	#	"final_guardrail": "final_guardrail",
+	#})
+	#builder.add_conditional_edges("assess_prompt", _after_assessment, {
+	#	"rewrite_prompt": "rewrite_prompt",
+	#	"approval": "approval",
+	#})
+	#builder.add_edge("rewrite_prompt", "approval")
+	#builder.add_conditional_edges("approval", _after_approval, {
+	#	"prepare_prompt": "prepare_prompt",
+	#	"refine_from_feedback": "refine_from_feedback",
+	#	"give_up": "give_up",
+	#})
+	#builder.add_edge("prepare_prompt", "final_guardrail")
+	#builder.add_edge("refine_from_feedback", "approval")
+	#builder.add_edge("give_up", "final_guardrail")
+	#builder.add_edge("final_guardrail", END)
+	###########################################################################
+
+
+	############# TEST INTAKE+ASSESS+REWRITE+APPROVAL+PREPARE PROMPT+PLANNER ################
 	builder.add_edge(START, "intake_triage")
 	builder.add_conditional_edges("intake_triage", _after_intake, {
 		"assess_prompt": "assess_prompt",
@@ -173,59 +209,18 @@ def build_graph(
 	})
 	builder.add_edge("rewrite_prompt", "approval")
 	builder.add_conditional_edges("approval", _after_approval, {
-		"final_guardrail": "final_guardrail",
+		"prepare_prompt": "prepare_prompt",
 		"refine_from_feedback": "refine_from_feedback",
 		"give_up": "give_up",
 	})
+	builder.add_edge("prepare_prompt", "planner_or_default")
+	builder.add_edge("planner_or_default", "final_guardrail")
 	builder.add_edge("refine_from_feedback", "approval")
 	builder.add_edge("give_up", "final_guardrail")
 	builder.add_edge("final_guardrail", END)
 	###########################################################################
+	
 
-	####  TO BE REMOVED ###
-	#builder.add_edge(START, "intake_triage")
-	#builder.add_conditional_edges("intake_triage", _after_intake, {
-	#	"assess_prompt": "assess_prompt",
-	#	"final_guardrail": "final_guardrail",
-	#})
-	
-	#builder.add_edge(START, "normalize_input")
-	#builder.add_edge("normalize_input", "language_gate")
-	#builder.add_conditional_edges("language_gate", _after_language, {
-	#	"pii_gate": "pii_gate",
-	#	"final_guardrail": "final_guardrail",
-	#})
-	#builder.add_conditional_edges("pii_gate", _after_pii, {
-	#	"domain_affinity": "domain_affinity",
-	#	"final_guardrail": "final_guardrail",
-	#})
-	#builder.add_conditional_edges("domain_affinity", _after_domain, {
-	#	"assess_prompt": "assess_prompt",
-	#	"final_guardrail": "final_guardrail",
-	#})
-	########################
-	
-	#builder.add_conditional_edges("assess_prompt", _after_assessment, {
-	#	"rewrite_prompt": "rewrite_prompt",
-	#	"approval": "approval",
-	#})
-	
-	#### TO BE REVISED ######
-	#builder.add_edge("rewrite_prompt", "approval")
-	#builder.add_conditional_edges("approval", _after_approval, {
-	#	"prepare_prompt": "prepare_prompt",
-	#	"refine_from_feedback": "refine_from_feedback",
-	#	"give_up": "give_up",
-	#})
-	#builder.add_edge("refine_from_feedback", "approval")
-	#builder.add_edge("give_up", "final_guardrail")
-	#builder.add_edge("prepare_prompt", "planner_or_default")
-	#builder.add_edge("planner_or_default", "execute_plan")
-	#builder.add_edge("execute_plan", "aggregate")
-	#builder.add_edge("aggregate", "final_guardrail")
-	##########################
-	
-	#builder.add_edge("final_guardrail", END)
 
 	# - Compile and return graph
 	logger.info("Compiling graph ...")

@@ -160,6 +160,64 @@ class ApprovalDecision(BaseModel):
 		),
 	)
 			
+
+class PlanStep(BaseModel):
+	"""Single execution step in a MAASAI task plan."""
+
+	id: str = Field(
+		...,
+		description="Stable step identifier, e.g. step-1.",
+	)
+
+	title: str = Field(
+		...,
+		description="Short human-readable step title.",
+	)
+
+	description: str = Field(
+		...,
+		description="Detailed description of what this step should do.",
+	)
+
+	worker: Literal["general", "image", "catalog", "literature"] = Field(
+		...,
+		description="Worker that should execute this step.",
+	)
+
+	inputs: list[str] = Field(
+		default_factory=list,
+		description="Inputs required by this step.",
+	)
+
+	expected_output: str = Field(
+		...,
+		description="Expected output of this step.",
+	)
+
+
+class TaskPlan(BaseModel):
+	"""Execution plan for an accepted and prepared user request."""
+
+	objective: str = Field(
+		...,
+		description="Overall objective to be executed.",
+	)
+
+	requires_rag_context: bool = Field(
+		default=False,
+		description="Whether retrieved planning context was used or is considered useful.",
+	)
+
+	rationale: str = Field(
+		...,
+		description="Short explanation of why this plan structure was chosen.",
+	)
+
+	steps: list[PlanStep] = Field(
+		...,
+		description="Ordered list of execution steps.",
+	)			
+			
 #class RAGDocument(BaseModel):
 #	doctype: str | None = None
 #	title: str | None = None
@@ -167,20 +225,6 @@ class ApprovalDecision(BaseModel):
 #	score: float | None = None
 #	source_id: str | None = None
 #	metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-
-#class PlanStep(BaseModel):
-#	step_id: str
-#	objective: str
-#	worker: Literal["literature", "caesar", "general"] = "general"
-#	tool_hint: str | None = None
-#	inputs: dict[str, Any] = Field(default_factory=dict)
-#	depends_on: list[str] = Field(default_factory=list)
-
-
-#class Plan(BaseModel):
-#	steps: list[PlanStep] = Field(default_factory=list)
 
 
 #class CaesarApp(BaseModel):

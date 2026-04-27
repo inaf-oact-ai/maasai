@@ -23,7 +23,9 @@ from .schemas import PreparedAsset
 from .schemas import PromptAssessment
 from .schemas import OptimizedPrompt
 from .schemas import ApprovalDecision
-#from .schemas import DomainDecision, PlanStep, StepResult, TaskPlan
+from .schemas import TaskPlan
+from .schemas import PlanStep
+#from .schemas import StepResult
 from .state import GraphState
 from .context import NodeContext
 from maasai import logger
@@ -276,22 +278,105 @@ def _default_optimized_prompt_from_state(state: GraphState) -> OptimizedPrompt:
 		rationale="Prompt was assessed as executable without rewrite.",
 	)
 
+def _serialize_rag_docs_for_planner(docs: list[Any]) -> list[dict[str, str]]:
+	"""Convert retrieved RAG docs into serializable planner context."""
+	items: list[dict[str, str]] = []
+
+	for doc in docs:
+		items.append({
+			"doc_id": str(getattr(doc, "doc_id", "")),
+			"title": str(getattr(doc, "title", "")),
+			"text": str(getattr(doc, "text", "")),
+		})
+
+	return items
+
+def _build_planner_prompt(
+	execution_prompt: str,
+	assessment: PromptAssessment | None = None,
+	prepared_assets: list[Any] | None = None,
+	rag_context: list[dict[str, str]] | None = None,
+) -> str:
+	"""Create prompt for planner agent."""
+	prepared_assets = prepared_assets or []
+	rag_context = rag_context or []
+
+	lines = [
+		"EXECUTION PROMPT:",
+		execution_prompt or "<empty>",
+	]
+
+	if assessment is not None:
+		lines.extend([
+			"",
+			"PROMPT ASSESSMENT:",
+			f"- complexity: {assessment.complexity}",
+			f"- requires_planning: {assessment.requires_planning}",
+			f"- task_type: {assessment.task_type}",
+			f"- suggested_worker: {assessment.suggested_worker}",
+			f"- missing_details: {assessment.missing_details}",
+			f"- ambiguities: {assessment.ambiguities}",
+		])
+
+	if prepared_assets:
+		lines.extend([
+			"",
+			"ATTACHMENTS:",
+		])
+		for idx, asset in enumerate(prepared_assets, start=1):
+			lines.append(f"- Asset {idx}:")
+			lines.append(f"  kind: {_asset_field(asset, 'kind', 'unknown')}")
+			lines.append(f"  path: {_asset_field(asset, 'path', '')}")
+			notes = _asset_field(asset, "notes", [])
+			if notes:
+				lines.append(f"  notes: {notes}")
+	else:
+		lines.extend([
+			"",
+			"ATTACHMENTS: none",
+		])
+
+	lines.extend([
+		"",
+		"AVAILABLE WORKERS:",
+		"- general: conceptual explanations, scientific reasoning, code guidance, workflow design.",
+		"- image: astronomical image/FITS analysis and image-derived morphology tasks.",
+		"- catalog: catalog queries, cross-matching, source metadata, survey table analysis.",
+		"- literature: literature search, paper summaries, reference discovery.",
+	])
+
+	if rag_context:
+		lines.extend([
+			"",
+			"OPTIONAL PLANNING CONTEXT FROM RAG:",
+		])
+		for idx, item in enumerate(rag_context, start=1):
+			lines.extend([
+				f"[{idx}] {item.get('title') or item.get('doc_id') or 'Untitled'}",
+				item.get("text", ""),
+				"",
+			])
+	else:
+		lines.extend([
+			"",
+			"OPTIONAL PLANNING CONTEXT FROM RAG: none",
+		])
+
+	lines.extend([
+		"",
+		"PLANNING INSTRUCTIONS:",
+		"- Produce an ordered execution plan.",
+		"- Use the fewest steps needed.",
+		"- Assign one worker to each step.",
+		"- Do not include final scientific answers in the plan.",
+		"- The plan should describe what downstream workers should do.",
+	])
+
+	return "\n".join(lines)
+
 ##################################################
 ###          GRAPH NODES
 ##################################################
-#class NodeContext:
-#	def __init__(
-#		self, *, 
-#		settings: Settings, 
-#		rag: PromptRAG, 
-#		agents: AgentFactory
-#	) -> None:
-#		""" Node context """
-#		self.settings = settings
-#		self.rag = rag
-#		self.agents = agents
-
-
 def intake_triage(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	""" User input triage operations """
 	messages = state.get("messages", [])
@@ -675,31 +760,106 @@ def give_up(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	}
 	
 
-#def prepare_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	_ = ctx
-#	optimized = state.get("optimized_prompt")
-#	approved_prompt = optimized.rewritten_prompt if optimized else state["raw_user_text"]
-#	return {"approved_prompt": approved_prompt, "status": "running"}
+def prepare_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Prepare the final prompt to be consumed by downstream execution nodes."""
+	_ = ctx
 
+	approved_prompt = state.get("approved_prompt")
+	optimized_prompt = state.get("optimized_prompt")
+	raw_user_text = state.get("raw_user_text", "")
 
-#def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	assessment: PromptAssessment = state["prompt_assessment"]
-#	prompt = state["approved_prompt"]
-#	if assessment.complexity == "complex":
-#		plan = ctx.agents.planner_agent.invoke({"messages": [HumanMessage(content=prompt)]})["structured_response"]
-#	else:
-#		plan = TaskPlan(
-#			objective=prompt,
-#			steps=[
-#				PlanStep(
-#					id="step-1",
-#					title="Direct execution",
-#					description="Answer directly with the general scientific worker.",
-#					worker="general",
-#				)
-#			],
-#		)
-#	return {"task_plan": plan}
+	if approved_prompt:
+		execution_prompt = approved_prompt
+	elif optimized_prompt:
+		execution_prompt = optimized_prompt.rewritten_prompt
+	else:
+		execution_prompt = raw_user_text
+
+	return {
+		"execution_prompt": execution_prompt,
+		"status": "prepared",
+	}
+
+def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Create a task plan, either directly or using the planner agent."""
+	execution_prompt = state.get("execution_prompt") or state.get("approved_prompt") or state.get("raw_user_text", "")
+	assessment: PromptAssessment | None = state.get("prompt_assessment")
+	prepared_assets = state.get("prepared_assets", [])
+
+	requires_planner = False
+	if assessment is not None:
+		requires_planner = (
+			assessment.requires_planning
+			or assessment.complexity == "complex"
+		)
+
+	planner_rag_enabled = bool(state.get("planner_rag_enabled", False))
+	planner_rag_k = int(state.get("planner_rag_k", 5) or 5)
+
+	rag_context: list[dict[str, str]] = []
+
+	if requires_planner:
+		if planner_rag_enabled and ctx.rag is not None:
+			logger.info(
+				f"--> planner_or_default(): retrieving planner RAG context, k={planner_rag_k} ..."
+			)
+			try:
+				docs = ctx.rag.retrieve(execution_prompt, k=planner_rag_k)
+				rag_context = _serialize_rag_docs_for_planner(docs)
+			except Exception as exc:
+				logger.warning(
+					f"planner_or_default(): RAG retrieval failed, continuing without RAG: {exc}"
+				)
+				rag_context = []
+
+		planner_prompt = _build_planner_prompt(
+			execution_prompt=execution_prompt,
+			assessment=assessment,
+			prepared_assets=prepared_assets,
+			rag_context=rag_context,
+		)
+
+		logger.info("--> planner_or_default(): invoking planner_agent ...")
+
+		response = ctx.agents.planner_agent.invoke({
+			"messages": [HumanMessage(content=planner_prompt)]
+		})
+		plan: TaskPlan = response["structured_response"]
+
+	else:
+		worker = "general"
+		if assessment is not None and assessment.suggested_worker:
+			if assessment.suggested_worker in {"general", "image", "catalog", "literature"}:
+				worker = assessment.suggested_worker
+
+		plan = TaskPlan(
+			objective=execution_prompt,
+			requires_rag_context=False,
+			rationale=(
+				"Prompt assessment indicates this can be handled as a direct "
+				"single-step task without explicit multi-step planning."
+			),
+			steps=[
+				PlanStep(
+					id="step-1",
+					title="Direct execution",
+					description="Answer the execution prompt directly.",
+					worker=worker,
+					inputs=["execution_prompt"],
+					expected_output="A complete response to the approved execution prompt.",
+				)
+			],
+		)
+
+	logger.info(
+		f"--> planner_or_default(): created plan with {len(plan.steps)} step(s)"
+	)
+
+	return {
+		"task_plan": plan,
+		"planner_rag_context": rag_context,
+		"status": "planned",
+	}
 
 
 #def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
@@ -873,6 +1033,38 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		)
 		return {"final_answer": final, "status": "done"}
 
+
+	# - Prepared execution prompt
+	if status == "prepared":
+		final = FinalAnswer(
+			status="ok",
+			message="Prompt approved and prepared for downstream execution.",
+			answer=(
+				"The prompt has been approved and prepared for downstream execution.\n\n"
+				f"Execution prompt:\n{state.get('execution_prompt')}"
+			),
+			citations=[],
+			artifacts=[],
+			debug={
+				"execution_prompt": state.get("execution_prompt"),
+				"approved_prompt": state.get("approved_prompt"),
+				"approval_decision": (
+					state.get("approval_decision").model_dump()
+					if state.get("approval_decision") else None
+				),
+				"optimized_prompt": (
+					state.get("optimized_prompt").model_dump()
+					if state.get("optimized_prompt") else None
+				),
+				"prompt_assessment": (
+					state.get("prompt_assessment").model_dump()
+					if state.get("prompt_assessment") else None
+				),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+
+
 	# - Request re-written
 	if status == "running" and state.get("optimized_prompt") is not None:
 		optimized = state.get("optimized_prompt")
@@ -942,6 +1134,34 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 					state.get("approval_decision").model_dump()
 					if state.get("approval_decision") else None
 				),
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+		
+	# - Task planned message
+	if status == "planned":
+		plan = state.get("task_plan")
+		final = FinalAnswer(
+			status="ok",
+			message="Execution prompt has been planned.",
+			answer=(
+				"The approved execution prompt has been converted into a task plan.\n\n"
+				f"Objective:\n{getattr(plan, 'objective', None)}\n\n"
+				f"Rationale:\n{getattr(plan, 'rationale', None)}\n\n"
+				"Steps:\n"
+				+ "\n".join(
+					f"- {step.id} [{step.worker}] {step.title}: {step.description}"
+					for step in getattr(plan, "steps", [])
+				)
+			),
+			citations=[],
+			artifacts=[],
+			debug={
+				"task_plan": plan.model_dump() if plan else None,
+				"planner_rag_enabled": state.get("planner_rag_enabled"),
+				"planner_rag_k": state.get("planner_rag_k"),
+				"planner_rag_context": state.get("planner_rag_context", []),
+				"execution_prompt": state.get("execution_prompt"),
 			},
 		)
 		return {"final_answer": final, "status": "done"}
