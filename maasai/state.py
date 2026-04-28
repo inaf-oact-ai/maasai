@@ -52,7 +52,7 @@ class GraphState(TypedDict, total=False):
 	
 	task_plan: TaskPlan | None
 	planner_rag_enabled: bool
-	planner_rag_context: list[dict[str, str]]
+	planner_rag_context: list[dict[str, Any]]
 	planner_rag_k: int
 	
 	#execution_results: list[StepResult]

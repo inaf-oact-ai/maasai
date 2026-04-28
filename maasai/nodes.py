@@ -278,15 +278,25 @@ def _default_optimized_prompt_from_state(state: GraphState) -> OptimizedPrompt:
 		rationale="Prompt was assessed as executable without rewrite.",
 	)
 
-def _serialize_rag_docs_for_planner(docs: list[Any]) -> list[dict[str, str]]:
-	"""Convert retrieved RAG docs into serializable planner context."""
-	items: list[dict[str, str]] = []
+	
+def _serialize_rag_docs_for_planner(docs: list[Any]) -> list[dict[str, Any]]:
+	"""Convert retrieved RAG docs into serializable planner context.
+
+	Keep full metadata so retrieved chunks can be cited in the plan,
+	final answer, and debug output.
+	"""
+	items: list[dict[str, Any]] = []
 
 	for doc in docs:
+		metadata = dict(getattr(doc, "metadata", {}) or {})
+
 		items.append({
 			"doc_id": str(getattr(doc, "doc_id", "")),
 			"title": str(getattr(doc, "title", "")),
 			"text": str(getattr(doc, "text", "")),
+			"score": getattr(doc, "score", None),
+			"collection": getattr(doc, "collection", None) or metadata.get("collection"),
+			"metadata": metadata,
 		})
 
 	return items
@@ -295,7 +305,7 @@ def _build_planner_prompt(
 	execution_prompt: str,
 	assessment: PromptAssessment | None = None,
 	prepared_assets: list[Any] | None = None,
-	rag_context: list[dict[str, str]] | None = None,
+	rag_context: list[dict[str, Any]] | None = None,
 ) -> str:
 	"""Create prompt for planner agent."""
 	prepared_assets = prepared_assets or []
@@ -345,17 +355,54 @@ def _build_planner_prompt(
 		"- literature: literature search, paper summaries, reference discovery.",
 	])
 
+	
 	if rag_context:
 		lines.extend([
 			"",
 			"OPTIONAL PLANNING CONTEXT FROM RAG:",
+			"Use this only to improve the execution plan. Do not treat it as final scientific evidence.",
 		])
 		for idx, item in enumerate(rag_context, start=1):
+			metadata = item.get("metadata", {}) or {}
+			source_bits = []
+
+			for key in [
+				"collection",
+				"doctype",
+				"title",
+				"paper_title",
+				"document_title",
+				"authors",
+				"first_author",
+				"year",
+				"journal",
+				"doi",
+				"arxiv_id",
+				"arxiv_abs_url",
+				"url",
+				"file_name",
+				"page_label",
+			]:
+				value = item.get(key) or metadata.get(key)
+				if value:
+					source_bits.append(f"{key}: {value}")
+
 			lines.extend([
 				f"[{idx}] {item.get('title') or item.get('doc_id') or 'Untitled'}",
+				f"doc_id: {item.get('doc_id')}",
+				f"collection: {item.get('collection')}",
+				f"score: {item.get('score')}",
+			])
+
+			if source_bits:
+				lines.append("source_metadata: " + "; ".join(str(x) for x in source_bits))
+
+			lines.extend([
+				"excerpt:",
 				item.get("text", ""),
 				"",
 			])
+			
 	else:
 		lines.extend([
 			"",
@@ -373,6 +420,29 @@ def _build_planner_prompt(
 	])
 
 	return "\n".join(lines)
+
+
+def _has_meaningful_rag_source(item: dict[str, Any]) -> bool:
+	metadata = item.get("metadata", {}) or {}
+
+	if item.get("text"):
+		return True
+
+	for key in [
+		"title",
+		"paper_title",
+		"document_title",
+		"file_name",
+		"file_path",
+		"doi",
+		"arxiv_id",
+		"arxiv_abs_url",
+		"url",
+	]:
+		if item.get(key) or metadata.get(key):
+			return True
+
+	return False
 
 ##################################################
 ###          GRAPH NODES
@@ -804,7 +874,14 @@ def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 				f"--> planner_or_default(): retrieving planner RAG context, k={planner_rag_k} ..."
 			)
 			try:
-				docs = ctx.rag.retrieve(execution_prompt, k=planner_rag_k)
+				domain_hint = None
+				if assessment is not None:
+					domain_hint = getattr(assessment, "task_type", None)
+				docs = ctx.rag.retrieve(
+					query=execution_prompt,
+					k=planner_rag_k,
+					domain_hint=domain_hint,
+				)
 				rag_context = _serialize_rag_docs_for_planner(docs)
 			except Exception as exc:
 				logger.warning(
@@ -1141,6 +1218,35 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	# - Task planned message
 	if status == "planned":
 		plan = state.get("task_plan")
+		
+		rag_citations = []
+		for idx, item in enumerate(state.get("planner_rag_context", []) or [], start=1):
+			if not _has_meaningful_rag_source(item):
+				continue
+
+			metadata = item.get("metadata", {}) or {}
+
+			rag_citations.append({
+				"index": idx,
+				"doc_id": item.get("doc_id"),
+				"title": item.get("title"),
+				"collection": item.get("collection") or metadata.get("collection"),
+				"score": item.get("score"),
+				"doctype": metadata.get("kind") or metadata.get("doctype"),
+				"file_name": metadata.get("file_name"),
+				"file_path": (
+					metadata.get("file_path") or metadata.get("filepath")
+				),
+				"page_label": metadata.get("page_label"),
+				"year": metadata.get("year") or metadata.get("pub_year"),
+				"authors": metadata.get("authors") or metadata.get("author"),
+				"doi": metadata.get("doi"),
+				"arxiv_id": metadata.get("arxiv_id"),
+				"arxiv_abs_url": metadata.get("arxiv_abs_url"),
+				"url": metadata.get("url") or metadata.get("download_url"),
+				"metadata": metadata,
+			})
+		
 		final = FinalAnswer(
 			status="ok",
 			message="Execution prompt has been planned.",
@@ -1154,7 +1260,7 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 					for step in getattr(plan, "steps", [])
 				)
 			),
-			citations=[],
+			citations=rag_citations,
 			artifacts=[],
 			debug={
 				"task_plan": plan.model_dump() if plan else None,
