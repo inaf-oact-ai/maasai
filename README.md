@@ -2,7 +2,7 @@
   <img src="share/Logo_MAASAI_noborder.jpg" alt="MAASAI logo" width="300"/>
 </p>
 
-# Multi-Agent AI System for Astrodata Inference
+# Multi-Agent AI System for Astrodata Insights
 
 This project organizes the MAASAI workflow as a modular LangGraph application.
 
