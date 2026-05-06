@@ -127,7 +127,7 @@ DEFAULT_DOMAINS: list[PlannerRAGDomain] = [
 	PlannerRAGDomain(
 		name="solar",
 		keywords=list(set(KEYWORDS_DEFAULT_SOLAR)),
-		collections=["solar-papers", "annreviews"],
+		collections=["solar-papers", "solar-living-reviews", "annreviews"],
 	),
 	PlannerRAGDomain(
 		name="exoplanet",
