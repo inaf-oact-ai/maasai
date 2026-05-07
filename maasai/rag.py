@@ -97,7 +97,7 @@ class PlannerRAGSettings:
 			item.strip()
 			for item in os.getenv(
 				"MAASAI_RAG_DEFAULT_COLLECTIONS",
-				"radiopapers,radiobooks,annreviews",
+				"radiopapers,radiobooks,annreviews,solar-living-reviews,solar-papers,exoplanets-papers",
 			).split(",")
 			if item.strip()
 		]

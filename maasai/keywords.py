@@ -11,7 +11,7 @@ import json
 import os
 
 ## MODULE IMPORT
-from pdfigcapx import logger
+from maasai import logger
 
 ###############################
 ###      LIST OF KEYWORDS
