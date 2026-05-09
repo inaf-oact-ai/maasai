@@ -16,7 +16,7 @@ from .schemas import PromptAssessment
 from .schemas import OptimizedPrompt
 from .schemas import ApprovalDecision
 from .schemas import TaskPlan
-	#from .schemas import StepResult
+from .schemas import StepResult
 
 ##################################################
 ###          GRAPH STATE
@@ -55,7 +55,7 @@ class GraphState(TypedDict, total=False):
 	planner_rag_context: list[dict[str, Any]]
 	planner_rag_k: int
 	
-	#execution_results: list[StepResult]
+	execution_results: list[StepResult]
 	final_answer: FinalAnswer | None
 
 	route_reason: str

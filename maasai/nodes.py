@@ -25,7 +25,7 @@ from .schemas import OptimizedPrompt
 from .schemas import ApprovalDecision
 from .schemas import TaskPlan
 from .schemas import PlanStep
-#from .schemas import StepResult
+from .schemas import StepResult
 from .state import GraphState
 from .context import NodeContext
 from maasai import logger
@@ -194,7 +194,7 @@ def _build_assessment_prompt(
 			"",
 			"ATTACHMENTS: none",
 		])
-
+	
 	lines.extend([
 		"",
 		"ASSESSMENT INSTRUCTIONS:",
@@ -203,6 +203,25 @@ def _build_assessment_prompt(
 		"- executable_as_is should be True if a useful direct answer or action is possible already.",
 		"- Identify missing details and non-blocking ambiguities separately.",
 		"- If rewrite is useful or required, provide a rewrite_goal describing the intended improvement.",
+		"",
+		"WORKER ROUTING RULES:",
+		"- suggested_worker must be one of: general, image, catalog, literature, step-dependent.",
+		"- Use suggested_worker='literature' when the request asks for papers, references, citations, inline references, bibliography, DOI/arXiv identifiers, publication context, literature review, related work, state of the art, or introduction/background sections with references.",
+		"- Use suggested_worker='literature' for scientific writing tasks that require references, e.g. introduction sections, related-work sections, background sections, abstracts with citations, or literature-grounded summaries.",
+		"- Use suggested_worker='image' when the request asks to inspect, classify, detect, segment, measure, or analyze objects/sources/morphology in attached images or FITS files.",
+		"- Use suggested_worker='catalog' when the request asks for catalog lookup, cross-matching, counterpart search, source metadata, coordinates, cone search, source tables, survey tables, or CAESAR queries.",
+		"- Use suggested_worker='general' only for conceptual explanations, workflow design, coding help, mathematical reasoning, or synthesis tasks that do not require image data, catalog/database access, or literature citations.",
+		"- If requires_planning=True and the task needs multiple specialist capabilities, set suggested_worker='step-dependent' and populate required_workers with the executable workers likely needed.",
+		"- required_workers must contain only executable workers: general, image, catalog, literature.",
+		"- Do not put 'step-dependent' inside required_workers.",
+		"",
+		"TASK TYPE RULES:",
+		"- For reference-grounded writing, use task_type='literature-grounded-writing'.",
+		"- For paper/reference search or summaries, use task_type='literature-review'.",
+		"- For attached image or FITS analysis, use task_type='image-analysis'.",
+		"- For catalog/counterpart/coordinate/database queries, use task_type='catalog-query'.",
+		"- For multi-step tasks requiring multiple specialist workers, use task_type='multi-step-specialist-analysis'.",
+		"- For conceptual methodology, coding, or workflow design without required citations, use task_type='workflow-design', 'coding', or 'explanation'.",
 	])
 
 	return "\n".join(lines)
@@ -227,6 +246,7 @@ def _build_rewrite_prompt(
 		f"- requires_planning: {assessment.requires_planning}",
 		f"- task_type: {assessment.task_type}",
 		f"- suggested_worker: {assessment.suggested_worker}",
+		f"- required_workers: {assessment.required_workers}",
 		f"- missing_details: {assessment.missing_details}",
 		f"- ambiguities: {assessment.ambiguities}",
 		f"- rewrite_goal: {assessment.rewrite_goal}",
@@ -324,10 +344,12 @@ def _build_planner_prompt(
 			f"- requires_planning: {assessment.requires_planning}",
 			f"- task_type: {assessment.task_type}",
 			f"- suggested_worker: {assessment.suggested_worker}",
+			f"- required_workers: {assessment.required_workers}",
 			f"- missing_details: {assessment.missing_details}",
 			f"- ambiguities: {assessment.ambiguities}",
 		])
 
+	
 	if prepared_assets:
 		lines.extend([
 			"",
@@ -355,6 +377,17 @@ def _build_planner_prompt(
 		"- literature: literature search, paper summaries, reference discovery.",
 	])
 
+	lines.extend([
+		"",
+		"WORKER ROUTING RULES:",
+		"- Use literature worker for tasks asking for papers, references, citations, inline references, bibliography, literature reviews, related work, state-of-the-art discussion, or introduction/background sections with references.",
+		"- Use image worker for attached image/FITS inspection, object/source classification, morphology, segmentation, source detection, photometry, or image-derived measurements.",
+		"- Use catalog worker for catalog queries, cross-matching, counterpart searches, coordinates, cone searches, source metadata, survey tables, or CAESAR-backed lookup.",
+		"- Use general worker for conceptual explanations, workflow design, coding guidance, and synthesis when no specialist evidence source is required.",
+		"- If suggested_worker is 'step-dependent', assign workers per step using required_workers as guidance.",
+		"- Do not assign all steps to general unless no specialist worker is needed.",
+		"- required_workers is a hint about which executable workers should appear in the plan; each PlanStep.worker must still be one of general, image, catalog, or literature.",
+	])
 	
 	if rag_context:
 		lines.extend([
@@ -417,6 +450,7 @@ def _build_planner_prompt(
 		"- Assign one worker to each step.",
 		"- Do not include final scientific answers in the plan.",
 		"- The plan should describe what downstream workers should do.",
+		"- If the task requires multiple specialist capabilities, create separate steps for those capabilities rather than collapsing everything into a general step.",
 	])
 
 	return "\n".join(lines)
@@ -443,6 +477,612 @@ def _has_meaningful_rag_source(item: dict[str, Any]) -> bool:
 			return True
 
 	return False
+
+def _citation_from_rag_item(index: int, item: dict[str, Any]) -> dict[str, Any]:
+	"""Build a structured citation record from a serialized RAG item."""
+	metadata = item.get("metadata", {}) or {}
+
+	return {
+		"index": index,
+		"doc_id": item.get("doc_id"),
+		"title": (
+			item.get("title")
+			or metadata.get("title")
+			or metadata.get("paper_title")
+			or metadata.get("document_title")
+		),
+		"collection": item.get("collection") or metadata.get("collection"),
+		"score": item.get("score"),
+		"doctype": metadata.get("kind") or metadata.get("doctype"),
+		"file_name": metadata.get("file_name"),
+		"file_path": metadata.get("file_path") or metadata.get("filepath"),
+		"page_label": metadata.get("page_label"),
+		"year": metadata.get("year") or metadata.get("pub_year"),
+		"authors": metadata.get("authors") or metadata.get("author"),
+		"first_author": metadata.get("first_author"),
+		"journal": metadata.get("journal"),
+		"volume": metadata.get("volume"),
+		"pages": metadata.get("pages"),
+		"doi": metadata.get("doi"),
+		"url": metadata.get("url") or metadata.get("download_url"),
+		"metadata": metadata,
+	}
+
+
+def _collect_citations_from_results(
+	results: list[StepResult],
+) -> list[dict[str, Any]]:
+	"""Collect unique citations from worker evidence."""
+	citations: list[dict[str, Any]] = []
+	seen: set[str] = set()
+
+	for result in results:
+		for item in result.evidence or []:
+			if not _has_meaningful_rag_source(item):
+				continue
+
+			metadata = item.get("metadata", {}) or {}
+
+			key = (
+				metadata.get("doi")
+				or metadata.get("arxiv_id")
+				or metadata.get("url")
+				or metadata.get("filepath")
+				or item.get("title")
+				or item.get("doc_id")
+			)
+
+			if key and str(key) in seen:
+				continue
+
+			if key:
+				seen.add(str(key))
+
+			citations.append(
+				_citation_from_rag_item(
+					index=len(citations) + 1,
+					item=item,
+				)
+			)
+
+	return citations
+
+def _extract_agent_text_old(response: Any) -> str:
+	"""Extract the last text response from a LangChain/LangGraph agent response."""
+	if isinstance(response, dict):
+		messages = response.get("messages", [])
+		if messages:
+			last_message = messages[-1]
+			content = getattr(last_message, "content", last_message)
+			if isinstance(content, str):
+				return content
+			return str(content)
+
+		if "output" in response:
+			return str(response["output"])
+
+		if "structured_response" in response:
+			return str(response["structured_response"])
+
+	return str(response)
+
+
+def _extract_agent_text(response: Any) -> str:
+	"""Extract visible text from a LangChain/LangGraph agent response.
+
+	Some chat backends return structured content blocks such as:
+	[
+		{"type": "thinking", "thinking": "..."},
+		{"type": "text", "text": "..."}
+	]
+
+	Only user-visible text blocks should be returned.
+	"""
+	def _content_to_text(content: Any) -> str:
+		if isinstance(content, str):
+			return content
+
+		if isinstance(content, list):
+			text_chunks = []
+			for item in content:
+				if isinstance(item, dict):
+					if item.get("type") == "text":
+						text = item.get("text", "")
+						if text:
+							text_chunks.append(str(text))
+					elif "text" in item and item.get("type") != "thinking":
+						text = item.get("text", "")
+						if text:
+							text_chunks.append(str(text))
+				elif isinstance(item, str):
+					text_chunks.append(item)
+
+			return "\n".join(text_chunks).strip()
+
+		if isinstance(content, dict):
+			if content.get("type") == "text":
+				return str(content.get("text", ""))
+			if "text" in content and content.get("type") != "thinking":
+				return str(content.get("text", ""))
+
+		return str(content)
+
+	if isinstance(response, dict):
+		messages = response.get("messages", [])
+		if messages:
+			last_message = messages[-1]
+			content = getattr(last_message, "content", last_message)
+			return _content_to_text(content)
+
+		if "output" in response:
+			return _content_to_text(response["output"])
+
+		if "structured_response" in response:
+			return _content_to_text(response["structured_response"])
+
+	content = getattr(response, "content", response)
+	return _content_to_text(content)
+
+
+def _serialize_rag_docs_for_worker(docs: list[Any]) -> list[dict[str, Any]]:
+	"""Convert retrieved RAG docs into serializable worker evidence."""
+	items: list[dict[str, Any]] = []
+
+	for doc in docs:
+		metadata = dict(getattr(doc, "metadata", {}) or {})
+
+		items.append({
+			"doc_id": str(getattr(doc, "doc_id", "")),
+			"title": str(getattr(doc, "title", "")),
+			"text": str(getattr(doc, "text", "")),
+			"score": getattr(doc, "score", None),
+			"collection": getattr(doc, "collection", None) or metadata.get("collection"),
+			"metadata": metadata,
+		})
+
+	return items
+
+
+def _build_worker_prompt(
+	plan: TaskPlan,
+	step: PlanStep,
+	state: GraphState,
+	previous_results: list[StepResult],
+	worker_rag_context: list[dict[str, Any]] | None = None,
+) -> str:
+	"""Build a worker-specific execution prompt for one plan step."""
+	execution_prompt = state.get("execution_prompt", "")
+	prepared_assets = state.get("prepared_assets", [])
+	planner_rag_context = state.get("planner_rag_context", []) or []
+	worker_rag_context = worker_rag_context or []
+
+	lines = [
+		"TASK OBJECTIVE:",
+		plan.objective,
+		"",
+		"APPROVED EXECUTION PROMPT:",
+		execution_prompt or "<empty>",
+		"",
+		"CURRENT PLAN STEP:",
+		f"- id: {step.id}",
+		f"- title: {step.title}",
+		f"- worker: {step.worker}",
+		f"- description: {step.description}",
+		f"- inputs: {step.inputs}",
+		f"- expected_output: {step.expected_output}",
+	]
+
+	if prepared_assets:
+		lines.extend([
+			"",
+			"AVAILABLE ATTACHMENTS:",
+		])
+		for idx, asset in enumerate(prepared_assets, start=1):
+			lines.append(f"- Asset {idx}:")
+			lines.append(f"  kind: {_asset_field(asset, 'kind', 'unknown')}")
+			lines.append(f"  path: {_asset_field(asset, 'path', '')}")
+			notes = _asset_field(asset, "notes", [])
+			if notes:
+				lines.append(f"  notes: {notes}")
+	else:
+		lines.extend([
+			"",
+			"AVAILABLE ATTACHMENTS: none",
+		])
+
+	if previous_results:
+		lines.extend([
+			"",
+			"PREVIOUS STEP RESULTS:",
+		])
+		for result in previous_results:
+			lines.extend([
+				f"- {result.step_id} [{result.worker}] {result.status}",
+				f"  output: {result.output or result.error or '<empty>'}",
+			])
+	else:
+		lines.extend([
+			"",
+			"PREVIOUS STEP RESULTS: none",
+		])
+
+	if planner_rag_context:
+		lines.extend([
+			"",
+			"PLANNER RAG CONTEXT:",
+			"This context was used to plan the task. Use it only as supporting context, not as final evidence unless independently relevant.",
+		])
+		for idx, item in enumerate(planner_rag_context, start=1):
+			lines.extend([
+				f"[{idx}] {item.get('title') or item.get('doc_id') or 'Untitled'}",
+				f"collection: {item.get('collection')}",
+				"excerpt:",
+				item.get("text", ""),
+				"",
+			])
+	else:
+		lines.extend([
+			"",
+			"PLANNER RAG CONTEXT: none",
+		])
+
+
+
+	if worker_rag_context:
+		lines.extend([
+			"",
+			"LITERATURE RAG CONTEXT:",
+			"Use only these retrieved literature passages as citation evidence. "
+			"Bibliography entries must correspond to retrieved evidence items, not to papers merely mentioned inside those passages. "
+			"Quote or cite them when relevant, but do not invent claims beyond the provided text.",
+		])
+
+		for idx, item in enumerate(worker_rag_context, start=1):
+			metadata = item.get("metadata", {}) or {}
+
+			source_bits = []
+			for key in [
+				"title",
+				"paper_title",
+				"document_title",
+				"authors",
+				"first_author",
+				"year",
+				"journal",
+				"doi",
+				"arxiv_id",
+				"arxiv_abs_url",
+				"url",
+				"page_label",
+			]:
+				value = item.get(key) or metadata.get(key)
+				if value:
+					source_bits.append(f"{key}: {value}")
+
+			lines.extend([
+				f"[L{idx}] {item.get('title') or item.get('doc_id') or 'Untitled'}",
+				f"doc_id: {item.get('doc_id')}",
+				f"collection: {item.get('collection')}",
+				f"score: {item.get('score')}",
+			])
+
+			if source_bits:
+				lines.append("source_metadata: " + "; ".join(str(x) for x in source_bits))
+
+			lines.extend([
+				"excerpt:",
+				item.get("text", ""),
+				"",
+			])
+	else:
+		if step.worker == "literature":
+			lines.extend([
+				"",
+				"LITERATURE RAG CONTEXT: none",
+			])
+
+	lines.extend([
+		"",
+		"EXECUTION INSTRUCTIONS:",
+		"- Execute only the current plan step.",
+		"- Use available tools if they are needed and available.",
+		"- Do not fabricate observations, catalog values, measurements, citations, or tool outputs.",
+		"- Do not include a separate References or Bibliography section in the answer body unless explicitly requested; structured citations are attached separately.",
+		"- If the step cannot be completed, explain why and what information/tool is missing.",
+		"- Return a concise but complete result for this step.",
+	])
+
+	return "\n".join(lines)
+
+
+def _build_aggregation_prompt(
+	plan: TaskPlan,
+	results: list[StepResult],
+	state: GraphState,
+	citations: list[dict[str, Any]] | None = None,
+) -> str:
+	"""Build the prompt consumed by the aggregator agent."""
+	
+	citations = citations or []
+	
+	lines = [
+		"TASK OBJECTIVE:",
+		plan.objective,
+		"",
+		"APPROVED EXECUTION PROMPT:",
+		state.get("execution_prompt", "") or "<empty>",
+		"",
+		"PLAN RATIONALE:",
+		plan.rationale,
+		"",
+		"STEP RESULTS:",
+	]
+
+	for result in results:
+		lines.extend([
+			f"- step_id: {result.step_id}",
+			f"  worker: {result.worker}",
+			f"  status: {result.status}",
+			f"  output: {result.output or '<empty>'}",
+			f"  error: {result.error or '<none>'}",
+			f"  evidence_count: {len(result.evidence or [])}",
+		])
+
+		if result.evidence:
+			lines.append("  evidence:")
+			for idx, item in enumerate(result.evidence, start=1):
+				metadata = item.get("metadata", {}) or {}
+				lines.extend([
+					f"    - evidence_id: {idx}",
+					f"      title: {item.get('title') or metadata.get('title') or metadata.get('paper_title')}",
+					f"      doc_id: {item.get('doc_id')}",
+					f"      collection: {item.get('collection')}",
+					f"      score: {item.get('score')}",
+					f"      doi: {metadata.get('doi')}",
+					f"      arxiv_id: {metadata.get('arxiv_id')}",
+					f"      url: {metadata.get('url') or metadata.get('arxiv_abs_url')}",
+				])
+
+
+	if citations:
+		lines.extend([
+			"",
+			"DEDUPLICATED CITATIONS:",
+			"Use these citation indices for inline references and the bibliography. "
+			"Do not create bibliography entries that are not listed here.",
+		])
+
+		for citation in citations:
+			authors = citation.get("authors") or []
+			if isinstance(authors, list):
+				authors_text = ", ".join(str(author) for author in authors)
+			else:
+				authors_text = str(authors)
+
+			lines.extend([
+				f"[{citation.get('index')}]",
+				f"title: {citation.get('title')}",
+				f"authors: {authors_text}",
+				f"year: {citation.get('year')}",
+				f"journal: {citation.get('journal')}",
+				f"volume: {citation.get('volume')}",
+				f"pages: {citation.get('pages')}",
+				f"doi: {citation.get('doi')}",
+				f"url: {citation.get('url')}",
+				"",
+			])
+	else:
+		lines.extend([
+			"",
+			"DEDUPLICATED CITATIONS: none",
+		])
+
+	lines.extend([
+		"",
+		"AGGREGATION INSTRUCTIONS:",
+		"- Produce the final user-facing answer.",
+		"- Synthesize the successful worker outputs.",
+		"- Mention failed or incomplete steps as caveats.",
+		"- Do not invent evidence or results that are not present in the step outputs.",
+		"- Keep the response clear and scientifically cautious.",
+		"- Preserve uncertainty: distinguish hard requirements, recommendations, and illustrative defaults."
+		"- Do not add a separate References or Bibliography section to the answer body unless explicitly requested; FinalAnswer.citations will carry the structured citation list.",
+		"- If DEDUPLICATED CITATIONS are provided, use only those citation indices for inline references.",
+		"- Do not create bibliography entries for evidence chunks or papers that are not listed in DEDUPLICATED CITATIONS.",
+		"- If multiple evidence chunks come from the same paper, cite the single deduplicated citation index.",
+	])
+
+	return "\n".join(lines)
+
+def _format_task_plan(plan: TaskPlan) -> str:
+	"""Format a task plan for human-readable logging."""
+	lines = [
+		"",
+		"=== TASK PLAN ===",
+		f"Objective: {plan.objective}",
+		f"Requires RAG context: {plan.requires_rag_context}",
+		f"Rationale: {plan.rationale}",
+		"",
+		"Steps:",
+	]
+
+	for step in plan.steps:
+		lines.extend([
+			f"- {step.id} [{step.worker}] {step.title}",
+			f"  description: {step.description}",
+			f"  inputs: {step.inputs}",
+			f"  expected_output: {step.expected_output}",
+		])
+
+	lines.append("=================")
+
+	return "\n".join(lines)
+
+
+def _correct_suggested_worker(
+	text: str,
+	prepared_assets: list[Any] | None,
+	assessment: PromptAssessment | None,
+) -> str:
+	"""Correct obvious worker-routing mistakes made by the assessment model."""
+	prepared_assets = prepared_assets or []
+	text_l = (text or "").lower()
+
+	literature_triggers = [
+		"inline reference",
+		"inline references",
+		"with references",
+		"with citations",
+		"add references",
+		"add citations",
+		"references",
+		"citations",
+		"bibliography",
+		"literature review",
+		"related work",
+		"state of the art",
+		"introduction section",
+		"background section",
+		"papers",
+		"doi",
+		"arxiv",
+	]
+
+	if any(trigger in text_l for trigger in literature_triggers):
+		return "literature"
+
+	has_image_asset = any(
+		_asset_field(asset, "kind", "unknown") in {"image", "fits"}
+		for asset in prepared_assets
+	)
+
+	image_triggers = [
+		"classify objects",
+		"classify sources",
+		"detect objects",
+		"detect sources",
+		"segment",
+		"segmentation",
+		"morphology",
+		"inspect image",
+		"inspect the image",
+		"analyze image",
+		"analyze the image",
+		"photometry",
+		"source detection",
+	]
+
+	if has_image_asset and any(trigger in text_l for trigger in image_triggers):
+		return "image"
+
+	catalog_triggers = [
+		"catalog",
+		"catalogue",
+		"cross-match",
+		"crossmatch",
+		"counterpart",
+		"counterparts",
+		"cone search",
+		"source metadata",
+		"ra dec",
+		"radec",
+		"coordinates",
+		"arcsec",
+		"arcmin",
+		"caesar",
+		"simbad",
+		"ned",
+		"vizier",
+	]
+
+	if any(trigger in text_l for trigger in catalog_triggers):
+		return "catalog"
+
+	if assessment is not None and assessment.suggested_worker in {
+		"general",
+		"image",
+		"catalog",
+		"literature",
+	}:
+		return assessment.suggested_worker
+
+	if assessment is not None and assessment.suggested_worker == "step-dependent":
+		required_workers = getattr(assessment, "required_workers", []) or []
+
+		# If the assessment says step-dependent but planning is not used for some reason,
+		# choose the first specialist worker as a safe direct fallback.
+		for candidate in ["literature", "image", "catalog", "general"]:
+			if candidate in required_workers:
+				return candidate
+
+	return "general"
+
+
+def _default_step_for_worker(worker: str) -> PlanStep:
+	"""Create a worker-specific default step for direct single-step execution."""
+
+	if worker == "literature":
+		return PlanStep(
+			id="step-1",
+			title="Retrieve literature evidence and write with citations",
+			description=(
+				"Use literature RAG to retrieve relevant publications/passages, then answer "
+				"the approved prompt using only retrieved evidence for inline references and "
+				"bibliography entries."
+			),
+			worker="literature",
+			inputs=["execution_prompt", "literature_rag_context"],
+			expected_output=(
+				"A literature-grounded response with inline citations and a bibliography "
+				"containing only sources supported by retrieved evidence."
+			),
+		)
+
+	if worker == "image":
+		return PlanStep(
+			id="step-1",
+			title="Analyze attached astronomical image data",
+			description=(
+				"Use the attached image assets to perform the requested image analysis task. "
+				"Report limitations if the required image content, metadata, or calibration "
+				"information are missing."
+			),
+			worker="image",
+			inputs=["execution_prompt", "prepared_assets"],
+			expected_output=(
+				"An image-analysis result grounded in the attached data, with caveats for "
+				"missing metadata or unsupported measurements."
+			),
+		)
+
+	if worker == "catalog":
+		return PlanStep(
+			id="step-1",
+			title="Query catalog or source metadata",
+			description=(
+				"Use catalog/database tools to perform the requested lookup, counterpart search, "
+				"cross-match, coordinate-based query, source metadata retrieval, or survey-table "
+				"analysis."
+			),
+			worker="catalog",
+			inputs=["execution_prompt"],
+			expected_output=(
+				"A catalog-grounded result with retrieved source metadata, query results, "
+				"or a clear explanation of missing query parameters/tools."
+			),
+		)
+
+	return PlanStep(
+		id="step-1",
+		title="Direct scientific execution",
+		description=(
+			"Answer the execution prompt directly using scientific reasoning. "
+			"Do not fabricate unavailable observations, data products, citations, or tool results."
+		),
+		worker="general",
+		inputs=["execution_prompt"],
+		expected_output="A complete response to the approved execution prompt.",
+	)
 
 ##################################################
 ###          GRAPH NODES
@@ -664,7 +1304,9 @@ def assess_prompt(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		f"executable_as_is={assessment.executable_as_is}, "
 		f"complexity={assessment.complexity}, "
 		f"requires_planning={assessment.requires_planning}, "
-		f"suggested_worker={assessment.suggested_worker}"
+		f"task_type={assessment.task_type}, "
+		f"suggested_worker={assessment.suggested_worker}, "
+		f"required_workers={assessment.required_workers}"
 	)
 
 	return {
@@ -783,6 +1425,9 @@ def refine_from_feedback(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		lines.extend([
 			"",
 			"ASSESSMENT CONTEXT:",
+			f"- task_type: {assessment.task_type}",
+			f"- suggested_worker: {assessment.suggested_worker}",
+			f"- required_workers: {assessment.required_workers}",
 			f"- missing_details: {assessment.missing_details}",
 			f"- ambiguities: {assessment.ambiguities}",
 			f"- rewrite_goal: {assessment.rewrite_goal}",
@@ -855,6 +1500,11 @@ def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	execution_prompt = state.get("execution_prompt") or state.get("approved_prompt") or state.get("raw_user_text", "")
 	assessment: PromptAssessment | None = state.get("prompt_assessment")
 	prepared_assets = state.get("prepared_assets", [])
+	primary_worker = _correct_suggested_worker(
+		text=execution_prompt,
+		prepared_assets=prepared_assets,
+		assessment=assessment,
+	)
 
 	requires_planner = False
 	if assessment is not None:
@@ -904,33 +1554,58 @@ def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		plan: TaskPlan = response["structured_response"]
 
 	else:
-		worker = "general"
-		if assessment is not None and assessment.suggested_worker:
-			if assessment.suggested_worker in {"general", "image", "catalog", "literature"}:
-				worker = assessment.suggested_worker
+		#worker = "general"
+		worker = primary_worker
+		
+		#if assessment is not None and assessment.suggested_worker:
+		#	if assessment.suggested_worker in {"general", "image", "catalog", "literature"}:
+		#		worker = assessment.suggested_worker
+		
+		step = _default_step_for_worker(worker)
 
 		plan = TaskPlan(
 			objective=execution_prompt,
-			requires_rag_context=False,
+			requires_rag_context=(worker == "literature"),
 			rationale=(
 				"Prompt assessment indicates this can be handled as a direct "
-				"single-step task without explicit multi-step planning."
+				f"single-step task. The selected worker is '{worker}'."
 			),
-			steps=[
-				PlanStep(
-					id="step-1",
-					title="Direct execution",
-					description="Answer the execution prompt directly.",
-					worker=worker,
-					inputs=["execution_prompt"],
-					expected_output="A complete response to the approved execution prompt.",
-				)
-			],
+			steps=[step],
 		)
+		
+		#plan = TaskPlan(
+		#	objective=execution_prompt,
+		#	requires_rag_context=False,
+		#	rationale=(
+		#		"Prompt assessment indicates this can be handled as a direct "
+		#		"single-step task without explicit multi-step planning."
+		#	),
+		#	steps=[
+		#		PlanStep(
+		#			id="step-1",
+		#			title="Direct execution",
+		#			description="Answer the execution prompt directly.",
+		#			worker=worker,
+		#			inputs=["execution_prompt"],
+		#			expected_output="A complete response to the approved execution prompt.",
+		#		)
+		#	],
+		#)
+
+	plan = plan.model_copy(
+		update={
+			"requires_rag_context": bool(rag_context) or any(
+				step.worker == "literature"
+				for step in plan.steps
+			)
+		}
+	)
 
 	logger.info(
 		f"--> planner_or_default(): created plan with {len(plan.steps)} step(s)"
 	)
+
+	logger.info(_format_task_plan(plan))
 
 	return {
 		"task_plan": plan,
@@ -939,67 +1614,233 @@ def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	}
 
 
-#def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	results: list[StepResult] = []
-#	plan = state["task_plan"]
-#	worker_map = {
-#		"catalog": ctx.agents.catalog_agent,
-#		"image": ctx.agents.image_agent,
-#		"literature": ctx.agents.literature_agent,
-#		"general": ctx.agents.general_agent,
-#	}
-#	for step in plan.steps:
-#		agent = worker_map[step.worker]
-#		try:
-#			response = agent.invoke({
-#				"messages": [HumanMessage(content=f"Task objective: {plan.objective}\n\nStep: {step.model_dump_json(indent=2)}")]
-#			})
-#			last_message = response["messages"][-1]
-#			results.append(
-#				StepResult(
-#					step_id=step.id,
-#					worker=step.worker,
-#					status="ok",
-#					output=getattr(last_message, "content", str(last_message)),
-#					evidence=[],
-#				)
-#			)
-#		except Exception as exc:  # noqa: BLE001
-#			results.append(
-#				StepResult(
-#					step_id=step.id,
-#					worker=step.worker,
-#					status="failed",
-#					output="",
-#					evidence=[],
-#					error=str(exc),
-#				)
-#			)
-#	return {"execution_results": results}
+def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Execute each step in the task plan using the assigned worker agent."""
+	plan: TaskPlan | None = state.get("task_plan")
+
+	if plan is None:
+		return {
+			"execution_results": [],
+			"status": "execution_failed",
+			"route_reason": "Cannot execute plan because task_plan is missing.",
+		}
+
+	worker_map = {
+		"catalog": ctx.agents.catalog_agent,
+		"image": ctx.agents.image_agent,
+		"literature": ctx.agents.literature_agent,
+		"general": ctx.agents.general_agent,
+	}
+
+	results: list[StepResult] = []
+
+	for step in plan.steps:
+		agent = worker_map.get(step.worker)
+
+		if agent is None:
+			results.append(
+				StepResult(
+					step_id=step.id,
+					worker=step.worker,
+					status="failed",
+					output="",
+					evidence=[],
+					error=f"No worker agent is available for worker={step.worker!r}.",
+				)
+			)
+			continue
+
+		# - Retrieve info from RAG
+		worker_rag_context: list[dict[str, Any]] = []
+		
+		if step.worker == "literature" and ctx.rag is not None:
+			literature_rag_k = int(state.get("literature_rag_k", 8) or 8)
+
+			query = "\n".join([
+				plan.objective,
+				step.title,
+				step.description,
+				state.get("execution_prompt", ""),
+			]).strip()
+
+			logger.info(
+				f"--> execute_plan(): retrieving literature RAG context for step {step.id}, k={literature_rag_k} ..."
+			)
+
+			try:
+				docs = ctx.rag.retrieve(
+					query=query,
+					k=literature_rag_k,
+					domain_hint="literature",
+				)
+				worker_rag_context = _serialize_rag_docs_for_worker(docs)
+
+			except Exception as exc:
+				logger.warning(
+					f"execute_plan(): literature RAG retrieval failed for step {step.id}: {exc}"
+				)
+				worker_rag_context = []
+
+		elif step.worker == "general" and state.get("planner_rag_context"):
+			worker_rag_context = state.get("planner_rag_context", [])
+
+		# - Build worker prompt
+		worker_prompt = _build_worker_prompt(
+			plan=plan,
+			step=step,
+			state=state,
+			previous_results=results,
+			worker_rag_context=worker_rag_context,
+		)
+
+		logger.info(
+			f"--> execute_plan(): invoking {step.worker}_agent for step {step.id} ..."
+		)
+
+		try:
+			response = agent.invoke({
+				"messages": [HumanMessage(content=worker_prompt)]
+			})
+
+			output = _extract_agent_text(response)
+			
+			logger.info(
+				f"--> execute_plan(): completed {step.id} [{step.worker}], "
+				f"output_len={len(output or '')}, evidence_count={len(worker_rag_context)}"
+			)
+
+			results.append(
+				StepResult(
+					step_id=step.id,
+					worker=step.worker,
+					status="ok",
+					output=output,
+					evidence=worker_rag_context,
+					error=None,
+				)
+			)
+
+		except Exception as exc:
+			logger.exception(
+				f"execute_plan(): step {step.id} failed for worker={step.worker}"
+			)
+			results.append(
+				StepResult(
+					step_id=step.id,
+					worker=step.worker,
+					status="failed",
+					output="",
+					evidence=worker_rag_context,
+					error=str(exc),
+				)
+			)
+
+	return {
+		"execution_results": results,
+		"status": "executed",
+	}
 
 
-#def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
-#	plan = state["task_plan"]
-#	results = state.get("execution_results", [])
-#	summary_lines = [f"Objective: {plan.objective}", "", "Step results:"]
-#	caveats: list[str] = []
-#	for item in results:
-#		summary_lines.append(f"- {item.step_id} [{item.worker}] {item.status}: {item.output or item.error}")
-#		if item.status != "ok":
-#			caveats.append(f"Step {item.step_id} did not complete successfully.")
-#	request = "\n".join(summary_lines)
-#	response = ctx.agents.aggregator_agent.invoke({
-#		"messages": [HumanMessage(content=request)]
-#	})
-#	final_text = getattr(response["messages"][-1], "content", str(response["messages"][-1]))
-#	final = FinalAnswer(answer=final_text, citations=[], caveats=caveats, confidence="medium")
-#	return {"final_answer": final}
+def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	"""Aggregate worker results into the final MAASAI answer."""
+	plan: TaskPlan | None = state.get("task_plan")
+	results: list[StepResult] = state.get("execution_results", [])
+
+	logger.info(f"--> aggregate(): received {len(results)} execution result(s)")
+	for item in results:
+		logger.info(
+			f"--> aggregate(): result {item.step_id} [{item.worker}] "
+			f"status={item.status}, output_len={len(item.output or '')}"
+		)
+
+	if plan is None:
+		final = FinalAnswer(
+			status="error",
+			message="Cannot aggregate results because task_plan is missing.",
+			answer=None,
+			citations=[],
+			artifacts=[],
+			debug={
+				"execution_results": [
+					item.model_dump() if hasattr(item, "model_dump") else item
+					for item in results
+				],
+			},
+		)
+		return {"final_answer": final, "status": "done"}
+
+	caveats = [
+		f"Step {item.step_id} [{item.worker}] failed: {item.error}"
+		for item in results
+		if item.status != "ok"
+	]
+
+	# - Fill citations
+	citations = _collect_citations_from_results(results)
+	
+	# - Create aggregation prompt
+	aggregation_prompt = _build_aggregation_prompt(
+		plan=plan,
+		results=results,
+		state=state,
+		citations=citations,
+	)
+
+	logger.info("--> aggregate(): invoking aggregator_agent ...")
+
+	try:
+		response = ctx.agents.aggregator_agent.invoke({
+			"messages": [HumanMessage(content=aggregation_prompt)]
+		})
+		final_text = _extract_agent_text(response)
+
+	except Exception as exc:
+		logger.exception("aggregate(): aggregator_agent failed")
+		final_text = (
+			"The task was executed, but the aggregation agent failed. "
+			"Raw step results are available in debug output."
+		)
+		caveats.append(f"Aggregation failed: {exc}")
+
+	# - Create final answer
+	final = FinalAnswer(
+		status="ok" if not caveats else "error",
+		message=(
+			"Execution completed."
+			if not caveats
+			else "Execution completed with one or more caveats."
+		),
+		answer=final_text,
+		citations=citations,
+		artifacts=[],
+		debug={
+			"task_plan": plan.model_dump(),
+			"execution_results": [
+				item.model_dump() if hasattr(item, "model_dump") else item
+				for item in results
+			],
+			"caveats": caveats,
+			"planner_rag_context": state.get("planner_rag_context", []),
+		},
+	)
+
+	return {
+		"final_answer": final,
+		"status": "done",
+	}
 
 
 def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	_ = ctx
 
 	status = state.get("status")
+
+	# - FINAL ANSWER
+	if status == "done" and state.get("final_answer") is not None:
+		return {
+			"final_answer": state.get("final_answer"),
+			"status": "done",
+		}
 
 	# - ERROR: Invalid attachment
 	if status == "invalid_attachments":
@@ -1301,6 +2142,7 @@ def final_guardrail(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 			f"- requires_planning: {getattr(assessment, 'requires_planning', None)}\n"
 			f"- task_type: {getattr(assessment, 'task_type', None)}\n"
 			f"- suggested_worker: {getattr(assessment, 'suggested_worker', None)}\n"
+			f"- required_workers: {getattr(assessment, 'required_workers', None)}\n"
 			f"- missing_details: {getattr(assessment, 'missing_details', None)}\n"
 			f"- ambiguities: {getattr(assessment, 'ambiguities', None)}\n"
 			f"- rewrite_goal: {getattr(assessment, 'rewrite_goal', None)}\n"

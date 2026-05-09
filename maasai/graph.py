@@ -23,8 +23,8 @@ from .nodes import refine_from_feedback
 from .nodes import give_up
 from .nodes import prepare_prompt
 from .nodes import planner_or_default
-#from .nodes import aggregate
-#from .nodes import execute_plan
+from .nodes import execute_plan
+from .nodes import aggregate
 from .rag import PromptRAG
 from .state import GraphState
 from .tools import AstronomyToolRegistry
@@ -116,8 +116,8 @@ def build_graph(
 	builder.add_node("give_up", partial(give_up, ctx=ctx))
 	builder.add_node("prepare_prompt", partial(prepare_prompt, ctx=ctx))
 	builder.add_node("planner_or_default", partial(planner_or_default, ctx=ctx))
-	#builder.add_node("execute_plan", partial(execute_plan, ctx=ctx))
-	#builder.add_node("aggregate", partial(aggregate, ctx=ctx))
+	builder.add_node("execute_plan", partial(execute_plan, ctx=ctx))
+	builder.add_node("aggregate", partial(aggregate, ctx=ctx))
 	builder.add_node("final_guardrail", partial(final_guardrail, ctx=ctx))
 
 	# - Connect nodes
@@ -198,6 +198,30 @@ def build_graph(
 
 
 	############# TEST INTAKE+ASSESS+REWRITE+APPROVAL+PREPARE PROMPT+PLANNER ################
+	#builder.add_edge(START, "intake_triage")
+	#builder.add_conditional_edges("intake_triage", _after_intake, {
+	#	"assess_prompt": "assess_prompt",
+	#	"final_guardrail": "final_guardrail",
+	#})
+	#builder.add_conditional_edges("assess_prompt", _after_assessment, {
+	#	"rewrite_prompt": "rewrite_prompt",
+	#	"approval": "approval",
+	#})
+	#builder.add_edge("rewrite_prompt", "approval")
+	#builder.add_conditional_edges("approval", _after_approval, {
+	#	"prepare_prompt": "prepare_prompt",
+	#	"refine_from_feedback": "refine_from_feedback",
+	#	"give_up": "give_up",
+	#})
+	#builder.add_edge("prepare_prompt", "planner_or_default")
+	#builder.add_edge("planner_or_default", "final_guardrail")
+	#builder.add_edge("refine_from_feedback", "approval")
+	#builder.add_edge("give_up", "final_guardrail")
+	#builder.add_edge("final_guardrail", END)
+	###########################################################################
+	
+
+	############# TEST INTAKE+ASSESS+REWRITE+APPROVAL+PREPARE PROMPT+PLANNER + EXECUTOR ################
 	builder.add_edge(START, "intake_triage")
 	builder.add_conditional_edges("intake_triage", _after_intake, {
 		"assess_prompt": "assess_prompt",
@@ -214,13 +238,14 @@ def build_graph(
 		"give_up": "give_up",
 	})
 	builder.add_edge("prepare_prompt", "planner_or_default")
-	builder.add_edge("planner_or_default", "final_guardrail")
+	builder.add_edge("planner_or_default", "execute_plan")
+	builder.add_edge("execute_plan", "aggregate")
+	builder.add_edge("aggregate", "final_guardrail")
 	builder.add_edge("refine_from_feedback", "approval")
 	builder.add_edge("give_up", "final_guardrail")
 	builder.add_edge("final_guardrail", END)
 	###########################################################################
 	
-
 
 	# - Compile and return graph
 	logger.info("Compiling graph ...")

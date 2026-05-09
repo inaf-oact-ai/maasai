@@ -80,10 +80,33 @@ class PromptAssessment(BaseModel):
 		),
 	)
 
-	suggested_worker: str | None = Field(
+	#suggested_worker: str | None = Field(
+	#	default=None,
+	#	description=(
+	#		"Suggested downstream worker, e.g. general, image, catalog, literature."
+	#	),
+	#)
+	
+	suggested_worker: Literal[
+		"general",
+		"image",
+		"catalog",
+		"literature",
+		"step-dependent",
+	] | None = Field(
 		default=None,
 		description=(
-			"Suggested downstream worker, e.g. general, image, catalog, literature."
+			"Suggested downstream worker for single-worker tasks. "
+			"Use 'step-dependent' when requires_planning=True and different plan steps "
+			"should use different specialist workers."
+		),
+	)
+
+	required_workers: list[Literal["general", "image", "catalog", "literature"]] = Field(
+		default_factory=list,
+		description=(
+			"Workers likely required to complete the task. For single-step tasks this usually "
+			"contains one worker. For multi-step tasks it may contain several workers."
 		),
 	)
 
@@ -217,6 +240,39 @@ class TaskPlan(BaseModel):
 		...,
 		description="Ordered list of execution steps.",
 	)			
+		
+class StepResult(BaseModel):
+	"""Result produced by one executed MAASAI plan step."""
+
+	step_id: str = Field(
+		...,
+		description="Identifier of the executed plan step.",
+	)
+
+	worker: Literal["general", "image", "catalog", "literature"] = Field(
+		...,
+		description="Worker that executed the step.",
+	)
+
+	status: Literal["ok", "failed"] = Field(
+		...,
+		description="Whether the step completed successfully.",
+	)
+
+	output: str = Field(
+		default="",
+		description="Text output produced by the worker.",
+	)
+
+	evidence: list[dict[str, Any]] = Field(
+		default_factory=list,
+		description="Structured evidence, citations, tool outputs, or artifacts used by this step.",
+	)
+
+	error: str | None = Field(
+		default=None,
+		description="Error message if the step failed.",
+	)		
 			
 #class RAGDocument(BaseModel):
 #	doctype: str | None = None

@@ -10,6 +10,7 @@ from __future__ import annotations
 from langchain.agents import create_agent
 
 # - MAASAI MODULES
+from .config import Settings
 from .model_router import ModelRouter
 from .schemas import IntakeDecision
 from .schemas import PromptAssessment
@@ -24,9 +25,12 @@ class AgentFactory:
 	def __init__(
 		self, 
 		router: ModelRouter, 
-		tools: AstronomyToolRegistry
+		tools: AstronomyToolRegistry,
+		settings: Settings | None = None,
 	) -> None:
 		""" Create all agents """
+	
+		settings = settings or Settings()
 	
 		# - Intake agent (accepting/rejecting user inputs)
 		self.intake_agent = create_agent(
@@ -34,7 +38,7 @@ class AgentFactory:
 				stage="intake",
 				tool_required=False,
 				structured_output_required=True,
-				temperature=0.0,
+				temperature=settings.llm.intake_temperature,
 			),
 			tools=[],
 			response_format=IntakeDecision,
@@ -54,7 +58,7 @@ class AgentFactory:
 				stage="prompt_assessment",
 				tool_required=False,
 				structured_output_required=True,
-				temperature=0.0,
+				temperature=settings.llm.assessment_temperature,
 			),
 			tools=[],
 			response_format=PromptAssessment,
@@ -77,11 +81,20 @@ class AgentFactory:
 				"- complexity\n"
 				"- whether explicit planning is required\n"
 				"- task type\n"
-				"- suggested downstream worker\n"
+				"- suggested downstream worker, or step-dependent for multi-worker plans\n"
+				"- required workers for multi-step specialist plans\n"
 				"- missing details\n"
 				"- ambiguities\n"
 				"- rewrite goal, if any\n"
 				"- a concise reasoning summary\n\n"
+
+				"Worker routing policy:\n"
+				"- Route literature-grounded tasks to suggested_worker='literature'. This includes requests for papers, references, citations, inline references, bibliography, related work, literature reviews, state-of-the-art summaries, and introduction/background sections with references.\n"
+				"- Route image/FITS analysis tasks to suggested_worker='image'. This includes object/source classification, morphology analysis, segmentation, source detection, photometry, and visual/FITS inspection.\n"
+				"- Route catalog/database tasks to suggested_worker='catalog'. This includes catalog lookup, cross-matching, counterpart searches, coordinate/cone searches, source metadata retrieval, survey-table analysis, and CAESAR-backed queries.\n"
+				"- Route only non-specialist explanation, coding, workflow-design, and general reasoning tasks to suggested_worker='general'.\n"
+				"- If requires_planning=True and the task needs multiple specialist capabilities, set suggested_worker='step-dependent' and populate required_workers with the executable workers likely needed.\n"
+				"- required_workers must contain only executable workers: general, image, catalog, literature. Do not include 'step-dependent' in required_workers.\n\n"
 
 				"Do not reject requests for safety, language, or domain reasons; intake triage already handled that.\n"
 				"Return only the structured assessment."
@@ -94,7 +107,7 @@ class AgentFactory:
 				stage="prompt_optimization",
 				tool_required=False,
 				structured_output_required=True,
-				temperature=0.0,
+				temperature=settings.llm.optimizer_temperature,
 			),
 			tools=[],
 			response_format=OptimizedPrompt,
@@ -123,7 +136,7 @@ class AgentFactory:
 				stage="planner",
 				tool_required=False,
 				structured_output_required=True,
-				temperature=0.0,
+				temperature=settings.llm.planner_temperature,
 			),
 			tools=[],
 			response_format=TaskPlan,
@@ -150,40 +163,106 @@ class AgentFactory:
 			),
 		)
 
+		# - Define tools
+		worker_tools = []
+		if hasattr(tools, "query_caesar_rest"):
+			worker_tools.append(tools.query_caesar_rest)
 
-		#worker_tools = [tools.query_caesar_rest, tools.call_mcp_tool]
+		if hasattr(tools, "call_mcp_tool"):
+			worker_tools.append(tools.call_mcp_tool)
 
-		#self.catalog_agent = create_agent(
-		#	model=router.pick(stage="worker"),
-		#	tools=worker_tools,
-		#	system_prompt="You are the astronomy catalog/database specialist.",
-		#)
+		# - Worker agents
+		self.general_agent = create_agent(
+			model=router.get_llm(
+				stage="worker",
+				tool_required=False,
+				structured_output_required=False,
+				temperature=settings.llm.general_temperature,
+			),
+			tools=[],
+			system_prompt=(
+				"You are the MAASAI general scientific worker. "
+				"Handle conceptual explanations, scientific reasoning, coding guidance, "
+				"workflow design, and general astronomy/astrophysics tasks. "
+				"Do not invent unavailable observations, data products, citations, or tool results. "
+				"If required information is missing, state what is missing and proceed only with justified assumptions. "
+				"Clearly distinguish hard requirements, recommended defaults, and illustrative parameter values. "
+				"Do not present mission-specific thresholds as universal constants. "
+			),
+		)
+		
+		self.catalog_agent = create_agent(
+			model=router.get_llm(
+				stage="worker",
+				tool_required=bool(worker_tools),
+				structured_output_required=False,
+				temperature=settings.llm.catalog_temperature,
+			),
+			tools=worker_tools,
+			system_prompt=(
+				"You are the MAASAI catalog/database worker. "
+				"Handle catalog queries, cross-matching, source metadata retrieval, "
+				"coordinate-based searches, survey-table analysis, and CAESAR/MCP-backed data access. "
+				"Use tools when needed and available. "
+				"Do not analyze image pixels directly. "
+				"Do not fabricate catalog rows, coordinates, measurements, or source metadata."
+			),
+		)
 
-		#self.image_agent = create_agent(
-		#	model=router.pick(stage="worker", multimodal=True),
-		#	tools=worker_tools,
-		#	system_prompt="You are the astronomy image-analysis specialist.",
-		#)
+		self.image_agent = create_agent(
+			model=router.get_llm(
+				stage="worker",
+				tool_required=bool(worker_tools),
+				structured_output_required=False,
+				temperature=settings.llm.image_temperature,
+			),
+			tools=worker_tools,
+			system_prompt=(
+				"You are the MAASAI astronomical image-analysis worker. "
+				"Handle FITS/image inspection, morphology assessment, source detection guidance, "
+				"image-derived measurements, cutouts, segmentation products, and multimodal image tasks. "
+				"Use tools when needed and available. "
+				"Do not fabricate catalog metadata; request catalog-worker support when source metadata or cross-matches are needed."
+			),
+		)
 
-		#self.literature_agent = create_agent(
-		#	model=router.pick(stage="worker"),
-		#	tools=worker_tools,
-		#	system_prompt="You are the astronomy literature/evidence specialist.",
-		#)
+		self.literature_agent = create_agent(
+			model=router.get_llm(
+				stage="worker",
+				tool_required=bool(worker_tools),
+				structured_output_required=False,
+				temperature=settings.llm.literature_temperature,
+			),
+			tools=worker_tools,
+			system_prompt=(
+				"You are the MAASAI literature/evidence worker. "
+				"Handle literature search, paper summaries, reference discovery, method comparison, "
+				"related-work synthesis, introduction/background drafting with citations, "
+				"and scientific evidence synthesis. "
+				"When retrieved literature context is provided, use only that context for factual claims, inline citations, and bibliography entries. "
+				"Do not fabricate papers, citations, DOIs, arXiv identifiers, years, journals, or claims. "
+				"Do not add standalone bibliography entries for works that are merely mentioned inside a retrieved review article unless those works are themselves retrieved as evidence. "
+				"Do not include a separate References or Bibliography section in the answer body unless the user explicitly asks for one; "
+				"the system will attach structured citations separately. "
+				"If retrieved context is insufficient for the requested references, say so clearly."
+			),
+		)
 
-		#self.general_agent = create_agent(
-		#	model=router.pick(stage="worker"),
-		#	tools=worker_tools,
-		#	system_prompt="You are the general scientific workflow specialist.",
-		#)
-
-		#self.aggregator_agent = create_agent(
-		#	model=router.pick(stage="aggregator", complexity="complex"),
-		#	tools=[],
-		#	system_prompt=(
-		#		"Aggregate the worker outputs into a coherent final response. "
-		#		"Mention caveats where evidence is weak or incomplete."
-		#	),
-		#)
+		# - Aggregator agent
+		self.aggregator_agent = create_agent(
+			model=router.get_llm(
+				stage="aggregator",
+				tool_required=False,
+				structured_output_required=False,
+				temperature=settings.llm.aggregator_temperature,
+			),
+			tools=[],
+			system_prompt=(
+				"You are the MAASAI final-response aggregator. "
+				"Aggregate worker outputs into a coherent astronomy/astrophysics answer. "
+				"Preserve caveats, mention failed or incomplete steps, and do not invent evidence. "
+				"If the workers did not retrieve enough information, say so clearly."
+			),
+		)
 		
 		

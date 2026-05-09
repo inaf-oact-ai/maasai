@@ -65,6 +65,33 @@ class LLMSettings:
 	timeout_seconds: float = field(
 		default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
 	)
+	intake_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_INTAKE_TEMPERATURE", "0.0"))
+	)
+	assessment_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_ASSESSMENT_TEMPERATURE", "0.0"))
+	)
+	optimizer_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_OPTIMIZER_TEMPERATURE", "0.0"))
+	)
+	planner_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_PLANNER_TEMPERATURE", "0.0"))
+	)
+	general_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_GENERAL_TEMPERATURE", "0.0"))
+	)
+	catalog_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_CATALOG_TEMPERATURE", "0.0"))
+	)
+	image_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_IMAGE_TEMPERATURE", "0.0"))
+	)
+	literature_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_LITERATURE_TEMPERATURE", "0.3"))
+	)
+	aggregator_temperature: float = field(
+		default_factory=lambda: float(os.getenv("MAASAI_AGGREGATOR_TEMPERATURE", "0.0"))
+	)
 
 @dataclass(slots=True)
 class WorkflowSettings:

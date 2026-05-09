@@ -51,6 +51,124 @@ mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI"))
 mlflow.set_experiment(os.environ.get("MLFLOW_EXPERIMENT_NAME"))
 mlflow.langchain.autolog()
 
+
+###########################
+##    HELPERS
+###########################
+def _format_author_list(authors: object) -> str:
+	"""Format citation authors for terminal output."""
+	if not authors:
+		return ""
+
+	if isinstance(authors, list):
+		if len(authors) == 1:
+			return str(authors[0])
+		if len(authors) == 2:
+			return f"{authors[0]} & {authors[1]}"
+		return f"{authors[0]} et al."
+
+	return str(authors)
+
+
+def _format_citation(citation: dict) -> str:
+	"""Format one structured citation for normal terminal output."""
+	index = citation.get("index")
+	authors = _format_author_list(citation.get("authors"))
+	year = citation.get("year")
+	title = citation.get("title")
+	journal = citation.get("journal")
+	volume = citation.get("volume")
+	pages = citation.get("pages")
+	doi = citation.get("doi")
+	url = citation.get("url")
+
+	bits = []
+
+	if authors:
+		bits.append(authors)
+
+	if year:
+		bits.append(str(year))
+
+	if title:
+		bits.append(str(title))
+
+	pub_bits = []
+	if journal:
+		pub_bits.append(str(journal))
+	if volume:
+		pub_bits.append(str(volume))
+	if pages:
+		pub_bits.append(str(pages))
+
+	if pub_bits:
+		bits.append(", ".join(pub_bits))
+
+	if doi:
+		bits.append(f"doi:{doi}")
+	elif url:
+		bits.append(str(url))
+
+	body = ". ".join(bits)
+
+	if index is not None:
+		return f"[{index}] {body}"
+
+	return body
+
+
+def _print_normal_final(final) -> None:
+	"""Print a clean user-facing final answer."""
+	print("\n=== FINAL ANSWER ===")
+	print(f"Status: {final.status}")
+	print(f"Message: {final.message}")
+
+	if final.answer:
+		print("\nAnswer:")
+		print(final.answer)
+
+	if final.citations:
+		print("\nCitations:")
+		for citation in final.citations:
+			if isinstance(citation, dict):
+				print(_format_citation(citation))
+			else:
+				print(f"- {citation}")
+
+	if final.artifacts:
+		print("\nArtifacts:")
+		for artifact in final.artifacts:
+			print(f"- {artifact}")
+
+
+def _print_debug_final(final) -> None:
+	"""Print final answer with raw debug metadata."""
+	print("\n=== FINAL ANSWER ===")
+	print(f"Status: {final.status}")
+	print(f"Message: {final.message}")
+
+	if final.answer:
+		print("\nAnswer:")
+		print(final.answer)
+
+	if final.citations:
+		print("\nCitations:")
+		for citation in final.citations:
+			if isinstance(citation, dict):
+				print(json.dumps(citation, indent=2, default=str))
+			else:
+				print(f"- {citation}")
+
+	if final.artifacts:
+		print("\nArtifacts:")
+		for artifact in final.artifacts:
+			print(f"- {artifact}")
+
+	if final.debug:
+		print("\nDebug:")
+		#print(final.debug)
+		print(json.dumps(final.debug, indent=2, default=str))
+
 ###########################
 ##     ARGS
 ###########################
@@ -63,7 +181,16 @@ def get_args():
 	parser.add_argument("--input_imgs", default="")
 	
 	# - LLM options
-	parser.add_argument('-temperature','--temperature', dest='temperature', required=False, type=float, default=0.0, help='Default temperature value') 
+	parser.add_argument('-temperature', '--temperature', dest='temperature', required=False, type=float, default=None, help='Global temperature override for all agents')
+	parser.add_argument("--intake-temperature", type=float, default=None)
+	parser.add_argument("--assessment-temperature", type=float, default=None)
+	parser.add_argument("--optimizer-temperature", type=float, default=None)
+	parser.add_argument("--planner-temperature", type=float, default=None)
+	parser.add_argument("--general-temperature", type=float, default=None)
+	parser.add_argument("--catalog-temperature", type=float, default=None)
+	parser.add_argument("--image-temperature", type=float, default=None)
+	parser.add_argument("--literature-temperature", type=float, default=None)
+	parser.add_argument("--aggregator-temperature", type=float, default=None)
 	parser.add_argument("--llm-timeout", type=float, default=None, help="Timeout in seconds for LLM calls",)
 	parser.add_argument("--litellm-timeout", type=float, default=None, help="Timeout in seconds for LiteLLM Router calls.")
 	parser.add_argument("--litellm-num-retries", type=int, default=None, help="Number of LiteLLM Router retries.")
@@ -75,6 +202,8 @@ def get_args():
 	parser.add_argument("--thread-id", type=str, default="maasai-thread")
 	parser.add_argument("--print-graph", dest="print_graph", action="store_true", default=None, help="Print compiled LangGraph ASCII graph.")
 	parser.add_argument("--no-print-graph", dest="print_graph", action="store_false", help="Do not print compiled LangGraph ASCII graph.")
+	parser.add_argument("--output-mode", dest="output_mode", choices=["normal", "debug"], default="normal", help="Output verbosity mode: 'normal' prints a clean user-facing answer; 'debug' also prints raw citations and debug metadata.")
+	parser.add_argument("--debug-output", dest="debug_output", action="store_true", help="Shortcut for --output-mode debug.")
 	
 	# - Workflow options
 	parser.add_argument("--max-approval-iterations", type=int, default=None, help="Maximum number of prompt approval/revision iterations.")
@@ -180,6 +309,7 @@ def print_approval_interrupt(payload: dict) -> None:
 		print(f"requires_planning: {assessment.get('requires_planning')}")
 		print(f"task_type: {assessment.get('task_type')}")
 		print(f"suggested_worker: {assessment.get('suggested_worker')}")
+		print(f"required_workers: {assessment.get('required_workers')}")
 
 def ask_approval_decision() -> dict:
 	while True:
@@ -309,13 +439,11 @@ def build_runtime(args):
 
 		return "debug_done", settings
 		
-	
-	
 	#===========================
 	#==   BUILD AGENTS
 	#===========================
 	logger.info("Creating agents ...")
-	agents= AgentFactory(model_router, tool_inventory)
+	agents= AgentFactory(model_router, tool_inventory, settings=settings)
 
 	#===========================
 	#==   BUILD GRAPH
@@ -353,6 +481,45 @@ def apply_cli_overrides(settings: Settings, args) -> Settings:
 	if args.llm_timeout is not None:
 		settings.llm.timeout_seconds = args.llm_timeout
 
+	# - Agent temperature settings
+	if args.temperature is not None:
+		settings.llm.intake_temperature = args.temperature
+		settings.llm.assessment_temperature = args.temperature
+		settings.llm.optimizer_temperature = args.temperature
+		settings.llm.planner_temperature = args.temperature
+		settings.llm.general_temperature = args.temperature
+		settings.llm.catalog_temperature = args.temperature
+		settings.llm.image_temperature = args.temperature
+		settings.llm.literature_temperature = args.temperature
+		settings.llm.aggregator_temperature = args.temperature
+
+	if args.intake_temperature is not None:
+		settings.llm.intake_temperature = args.intake_temperature
+
+	if args.assessment_temperature is not None:
+		settings.llm.assessment_temperature = args.assessment_temperature
+
+	if args.optimizer_temperature is not None:
+		settings.llm.optimizer_temperature = args.optimizer_temperature
+
+	if args.planner_temperature is not None:
+		settings.llm.planner_temperature = args.planner_temperature
+
+	if args.general_temperature is not None:
+		settings.llm.general_temperature = args.general_temperature
+
+	if args.catalog_temperature is not None:
+		settings.llm.catalog_temperature = args.catalog_temperature
+
+	if args.image_temperature is not None:
+		settings.llm.image_temperature = args.image_temperature
+
+	if args.literature_temperature is not None:
+		settings.llm.literature_temperature = args.literature_temperature
+
+	if args.aggregator_temperature is not None:
+		settings.llm.aggregator_temperature = args.aggregator_temperature
+
 	# - LiteLLM router settings
 	if args.litellm_timeout is not None:
 		settings.litellm.timeout_seconds = args.litellm_timeout
@@ -380,6 +547,9 @@ def apply_cli_overrides(settings: Settings, args) -> Settings:
 	# - Runtime settings
 	if args.print_graph is not None:
 		settings.runtime.print_graph = args.print_graph
+		
+	if getattr(args, "debug_output", False):
+		args.output_mode = "debug"	
 
 	# - Planner RAG settings
 	if args.enable_planner_rag is not None:
@@ -508,34 +678,35 @@ def run_graph(graph, args, settings: Settings) -> None:
 		logger.warning("No final answer produced.")
 		return
 
-	print("\n=== FINAL ANSWER ===")
-	print(f"Status: {final.status}")
-	print(f"Message: {final.message}")
+	# - Print response
+	output_mode = getattr(args, "output_mode", "normal")
 
-	if final.answer:
-		print("\nAnswer:")
-		print(final.answer)
+	if output_mode == "debug":
+		_print_debug_final(final)
+	else:
+		_print_normal_final(final)
 
-	if final.citations:
-		print("\nCitations:")
-		for item in final.citations:
-			print(f"- {item}")
+	#print("\n=== FINAL ANSWER ===")
+	#print(f"Status: {final.status}")
+	#print(f"Message: {final.message}")
 
-	if final.artifacts:
-		print("\nArtifacts:")
-		for item in final.artifacts:
-			print(f"- {item}")
+	#if final.answer:
+	#	print("\nAnswer:")
+	#	print(final.answer)
 
-	if final.debug:
-		print("\nDebug:")
-		print(final.debug)
-		
-	# - Print other debug state fields
-	#print("\n=== GRAPH RESULT KEYS ===")
-	#print(result.keys())
+	#if final.citations:
+	#	print("\nCitations:")
+	#	for item in final.citations:
+	#		print(f"- {item}")
 
-	#print("\n=== PREPARED ASSETS IN STATE ===")
-	#print(result.get("prepared_assets"))
+	#if final.artifacts:
+	#	print("\nArtifacts:")
+	#	for item in final.artifacts:
+	#		print(f"- {item}")
+
+	#if final.debug:
+	#	print("\nDebug:")
+	#	print(final.debug)
 			
 	
 def run_cli(graph, args, settings: Settings):
