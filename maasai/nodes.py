@@ -5,6 +5,7 @@ from __future__ import annotations
 ###          MODULE IMPORT
 ##################################################
 # - STANDARD MODULES
+import re
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -70,6 +71,63 @@ def _strip_rewrite_metadata_sections(text: str) -> str:
 		return text.strip()
 
 	return text[:min(cut_positions)].strip()
+
+def _strip_references_section(text: str) -> str:
+	"""Remove model-generated reference/bibliography sections from final answer body."""
+	if not text:
+		return text
+
+	markers = [
+		"\n## References",
+		"\n# References",
+		"\n**References**",
+		"\nReferences:",
+		"\n---\n**References**",
+		"\n## Bibliography",
+		"\n# Bibliography",
+		"\n**Bibliography**",
+		"\nBibliography:",
+		"\n## Works Cited",
+		"\n# Works Cited",
+		"\n**Works Cited**",
+		"\nWorks Cited:",
+	]
+
+	positions = [
+		text.find(marker)
+		for marker in markers
+		if text.find(marker) != -1
+	]
+
+	if not positions:
+		return text.strip()
+
+	return text[:min(positions)].rstrip("- \n")
+	
+def _normalize_inline_citations(text: str) -> str:
+	"""Normalize repeated numeric inline citations such as [1, 1] -> [1]."""
+	if not text:
+		return text
+
+	def repl(match: re.Match[str]) -> str:
+		raw = match.group(1)
+		parts = [
+			part.strip()
+			for part in raw.split(",")
+			if part.strip().isdigit()
+		]
+
+		if not parts:
+			return match.group(0)
+
+		unique = []
+		for part in parts:
+			if part not in unique:
+				unique.append(part)
+
+		return "[" + ", ".join(unique) + "]"
+
+	return re.sub(r"\[([0-9,\s]+)\]", repl, text)
 
 #def _invoke_with_timeout(agent, payload, timeout_s: float):
 #	with ThreadPoolExecutor(max_workers=1) as executor:
@@ -885,8 +943,11 @@ def _build_aggregation_prompt(
 		"- Mention failed or incomplete steps as caveats.",
 		"- Do not invent evidence or results that are not present in the step outputs.",
 		"- Keep the response clear and scientifically cautious.",
-		"- Preserve uncertainty: distinguish hard requirements, recommendations, and illustrative defaults."
+		"- Preserve uncertainty: distinguish hard requirements, recommendations, and illustrative defaults.",
 		"- Do not add a separate References or Bibliography section to the answer body unless explicitly requested; FinalAnswer.citations will carry the structured citation list.",
+		"- Do not include a References, Bibliography, or Works Cited section in the answer body unless the user explicitly requested one; structured citations are printed separately.",
+		"- Avoid repeated citation markers such as [1, 1]; cite each source only once per claim.",
+		"- Use cautious wording: say 'recommended' or 'preferred' unless the evidence supports a hard requirement.",
 		"- If DEDUPLICATED CITATIONS are provided, use only those citation indices for inline references.",
 		"- Do not create bibliography entries for evidence chunks or papers that are not listed in DEDUPLICATED CITATIONS.",
 		"- If multiple evidence chunks come from the same paper, cite the single deduplicated citation index.",
@@ -1515,11 +1576,16 @@ def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 
 	planner_rag_enabled = bool(state.get("planner_rag_enabled", False))
 	planner_rag_k = int(state.get("planner_rag_k", 5) or 5)
-
 	rag_context: list[dict[str, str]] = []
+	required_workers = []
+	if assessment is not None:
+		required_workers = getattr(assessment, "required_workers", []) or []
+
+	skip_planner_rag = "literature" in required_workers
 
 	if requires_planner:
-		if planner_rag_enabled and ctx.rag is not None:
+		if planner_rag_enabled and ctx.rag is not None and not skip_planner_rag:
+		
 			logger.info(
 				f"--> planner_or_default(): retrieving planner RAG context, k={planner_rag_k} ..."
 			)
@@ -1681,8 +1747,16 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 				)
 				worker_rag_context = []
 
+		#elif step.worker == "general" and state.get("planner_rag_context"):
+		#	worker_rag_context = state.get("planner_rag_context", [])
+
 		elif step.worker == "general" and state.get("planner_rag_context"):
-			worker_rag_context = state.get("planner_rag_context", [])
+			has_prior_literature_result = any(
+				item.worker == "literature" and item.status == "ok"
+				for item in results
+			)
+			if not has_prior_literature_result:
+				worker_rag_context = state.get("planner_rag_context", [])
 
 		# - Build worker prompt
 		worker_prompt = _build_worker_prompt(
@@ -1793,6 +1867,8 @@ def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 			"messages": [HumanMessage(content=aggregation_prompt)]
 		})
 		final_text = _extract_agent_text(response)
+		final_text = _strip_references_section(final_text)
+		final_text = _normalize_inline_citations(final_text)
 
 	except Exception as exc:
 		logger.exception("aggregate(): aggregator_agent failed")
@@ -1802,6 +1878,7 @@ def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		)
 		caveats.append(f"Aggregation failed: {exc}")
 
+	
 	# - Create final answer
 	final = FinalAnswer(
 		status="ok" if not caveats else "error",
