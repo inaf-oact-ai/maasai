@@ -117,11 +117,26 @@ class RuntimeSettings:
 	)
 
 @dataclass(slots=True)
+class CaesarRestSettings:
+	""" CaesarRest api settings """
+	base_url: str = "http://localhost:8080"
+	api_prefix: str = "/caesar/api/v1.0"
+	cache_path: str = ".maasai/cache/caesar_apps.json"
+	refresh_tools: bool = False
+	enable_dynamic_app_tools: bool = True
+	timeout_seconds: float = 30.0
+	cache_ttl_seconds: float = 86400.0
+	auth_token: str | None = None
+
+
+@dataclass(slots=True)
 class Settings:
 	litellm: LiteLLMSettings = field(default_factory=LiteLLMSettings)
 	llm: LLMSettings = field(default_factory=LLMSettings)
 	workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
 	rag: PlannerRAGSettings = field(default_factory=PlannerRAGSettings)
 	runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
+	caesar_rest: CaesarRestSettings = field(default_factory=CaesarRestSettings)
+
 
 SETTINGS = Settings()

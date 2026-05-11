@@ -164,13 +164,8 @@ class AgentFactory:
 		)
 
 		# - Define tools
-		worker_tools = []
-		if hasattr(tools, "query_caesar_rest"):
-			worker_tools.append(tools.query_caesar_rest)
-
-		if hasattr(tools, "call_mcp_tool"):
-			worker_tools.append(tools.call_mcp_tool)
-
+		worker_tools = tools.get_tools() if hasattr(tools, "get_tools") else []
+		
 		# - Worker agents
 		self.general_agent = create_agent(
 			model=router.get_llm(

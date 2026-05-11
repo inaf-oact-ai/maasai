@@ -233,6 +233,16 @@ def get_args():
 	parser.add_argument("--llama-index-num-queries", type=int, default=None, help="Number of query-fusion generated queries used by llama-index-rag.")
 	parser.add_argument("--rag-request-timeout", type=float, default=None, help="Timeout in seconds for external RAG service calls.")
 
+	# - Caesar-Rest API options
+	parser.add_argument("--caesar-base-url", type=str, default=None)
+	parser.add_argument("--caesar-api-prefix", type=str, default=None)
+	parser.add_argument("--caesar-cache-path", type=str, default=None)
+	parser.add_argument("--caesar-refresh-tools", action="store_true", default=None)
+	parser.add_argument("--disable-caesar-dynamic-tools", action="store_true", default=False)
+	parser.add_argument("--caesar-timeout", type=float, default=None)
+	parser.add_argument("--caesar-cache-ttl", type=float, default=None)
+	parser.add_argument("--caesar-auth-token", type=str, default=None)
+
 	# - API options
 	parser.add_argument("--host", type=str, default="127.0.0.1")
 	parser.add_argument("--port", type=int, default=8000)
@@ -403,7 +413,16 @@ def build_runtime(args):
 	#===========================
 	# - Create tools
 	logger.info("Creating tool inventory ...")
-	tool_inventory= AstronomyToolRegistry()
+	tool_inventory= AstronomyToolRegistry(
+		caesar_base_url=settings.caesar_rest.base_url,
+		caesar_api_prefix=settings.caesar_rest.api_prefix,
+		caesar_cache_path=settings.caesar_rest.cache_path,
+		caesar_refresh_tools=settings.caesar_rest.refresh_tools,
+		caesar_enable_dynamic_app_tools=settings.caesar_rest.enable_dynamic_app_tools,
+		caesar_timeout_seconds=settings.caesar_rest.timeout_seconds,
+		caesar_cache_ttl_seconds=settings.caesar_rest.cache_ttl_seconds,
+		caesar_auth_token=settings.caesar_rest.auth_token,
+	)
 	
 	# - Create RAG
 	logger.info("Creating prompt RAG ...")
@@ -598,6 +617,31 @@ def apply_cli_overrides(settings: Settings, args) -> Settings:
 
 	if args.rag_metadata_payload_key is not None:
 		settings.rag.metadata_payload_key = args.rag_metadata_payload_key
+
+	# - caesar-rest API settings
+	if args.caesar_base_url is not None:
+		settings.caesar_rest.base_url = args.caesar_base_url
+
+	if args.caesar_api_prefix is not None:
+		settings.caesar_rest.api_prefix = args.caesar_api_prefix
+
+	if args.caesar_cache_path is not None:
+		settings.caesar_rest.cache_path = args.caesar_cache_path
+
+	if args.caesar_refresh_tools is not None:
+		settings.caesar_rest.refresh_tools = args.caesar_refresh_tools
+
+	if args.disable_caesar_dynamic_tools:
+		settings.caesar_rest.enable_dynamic_app_tools = False
+
+	if args.caesar_timeout is not None:
+		settings.caesar_rest.timeout_seconds = args.caesar_timeout
+
+	if args.caesar_cache_ttl is not None:
+		settings.caesar_rest.cache_ttl_seconds = args.caesar_cache_ttl
+
+	if args.caesar_auth_token is not None:
+		settings.caesar_rest.auth_token = args.caesar_auth_token
 
 	return settings
 
