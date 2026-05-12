@@ -267,7 +267,7 @@ def _build_assessment_prompt(
 		"- Use suggested_worker='literature' when the request asks for papers, references, citations, inline references, bibliography, DOI/arXiv identifiers, publication context, literature review, related work, state of the art, or introduction/background sections with references.",
 		"- Use suggested_worker='literature' for scientific writing tasks that require references, e.g. introduction sections, related-work sections, background sections, abstracts with citations, or literature-grounded summaries.",
 		"- Use suggested_worker='image' when the request asks to inspect, classify, detect, segment, measure, or analyze objects/sources/morphology in attached images or FITS files.",
-		"- Use suggested_worker='catalog' when the request asks for catalog lookup, cross-matching, counterpart search, source metadata, coordinates, cone search, source tables, survey tables, or CAESAR queries.",
+		"- Use suggested_worker='catalog' when the request asks for catalog lookup, cross-matching, counterpart search, source metadata, coordinates, cone search, source tables, or survey tables.",	
 		"- Use suggested_worker='general' only for conceptual explanations, workflow design, coding help, mathematical reasoning, or synthesis tasks that do not require image data, catalog/database access, or literature citations.",
 		"- If requires_planning=True and the task needs multiple specialist capabilities, set suggested_worker='step-dependent' and populate required_workers with the executable workers likely needed.",
 		"- required_workers must contain only executable workers: general, image, catalog, literature.",
@@ -951,6 +951,7 @@ def _build_aggregation_prompt(
 		"- If DEDUPLICATED CITATIONS are provided, use only those citation indices for inline references.",
 		"- Do not create bibliography entries for evidence chunks or papers that are not listed in DEDUPLICATED CITATIONS.",
 		"- If multiple evidence chunks come from the same paper, cite the single deduplicated citation index.",
+		"- If a worker times out or fails before producing results, do not state that no data/results were found. State only that no valid result was produced."
 	])
 
 	return "\n".join(lines)
@@ -979,6 +980,37 @@ def _format_task_plan(plan: TaskPlan) -> str:
 
 	return "\n".join(lines)
 
+
+def _select_primary_worker(
+	assessment: PromptAssessment | None,
+	prepared_assets: list[Any] | None = None,
+) -> str:
+	"""Select the primary worker from the structured prompt assessment.
+
+	Trust the assessment model by default. This function is only a defensive
+	fallback for missing, invalid, or step-dependent worker assignments.
+	"""
+	prepared_assets = prepared_assets or []
+
+	if assessment is not None:
+		if assessment.suggested_worker in {"general", "image", "catalog", "literature"}:
+			return assessment.suggested_worker
+
+		if assessment.suggested_worker == "step-dependent":
+			required_workers = getattr(assessment, "required_workers", []) or []
+			for candidate in ["image", "catalog", "literature", "general"]:
+				if candidate in required_workers:
+					return candidate
+
+	has_image_asset = any(
+		_asset_field(asset, "kind", "unknown") in {"image", "fits"}
+		for asset in prepared_assets
+	)
+
+	if has_image_asset:
+		return "image"
+
+	return "general"
 
 def _correct_suggested_worker(
 	text: str,
@@ -1561,10 +1593,14 @@ def planner_or_default(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	execution_prompt = state.get("execution_prompt") or state.get("approved_prompt") or state.get("raw_user_text", "")
 	assessment: PromptAssessment | None = state.get("prompt_assessment")
 	prepared_assets = state.get("prepared_assets", [])
-	primary_worker = _correct_suggested_worker(
-		text=execution_prompt,
-		prepared_assets=prepared_assets,
+	#primary_worker = _correct_suggested_worker(
+	#	text=execution_prompt,
+	#	prepared_assets=prepared_assets,
+	#	assessment=assessment,
+	#)
+	primary_worker = _select_primary_worker(
 		assessment=assessment,
+		prepared_assets=prepared_assets,
 	)
 
 	requires_planner = False
@@ -1770,11 +1806,22 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		logger.info(
 			f"--> execute_plan(): invoking {step.worker}_agent for step {step.id} ..."
 		)
+		
+		if step.worker == "image":
+			logger.info(
+				"--> execute_plan(): image worker should have CAESAR tools available via AgentFactory worker_tools."
+			)
 
 		try:
-			response = agent.invoke({
-				"messages": [HumanMessage(content=worker_prompt)]
-			})
+			#response = agent.invoke({
+			#	"messages": [HumanMessage(content=worker_prompt)]
+			#})
+			timeout_s = ctx.settings.llm.timeout_seconds
+			response = _invoke_with_timeout(
+				agent,
+				{"messages": [HumanMessage(content=worker_prompt)]},
+				timeout_s=timeout_s,
+			)
 
 			output = _extract_agent_text(response)
 			
@@ -1794,6 +1841,21 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 				)
 			)
 
+		except FuturesTimeoutError:
+			logger.exception(
+				f"execute_plan(): step {step.id} timed out for worker={step.worker}"
+			)
+			results.append(
+				StepResult(
+					step_id=step.id,
+					worker=step.worker,
+					status="failed",
+					output="",
+					evidence=worker_rag_context,
+					error=f"{step.worker}_agent timed out after {ctx.settings.llm.timeout_seconds} seconds.",
+				)
+			)
+	
 		except Exception as exc:
 			logger.exception(
 				f"execute_plan(): step {step.id} failed for worker={step.worker}"

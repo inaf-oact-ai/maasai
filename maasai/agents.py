@@ -91,7 +91,7 @@ class AgentFactory:
 				"Worker routing policy:\n"
 				"- Route literature-grounded tasks to suggested_worker='literature'. This includes requests for papers, references, citations, inline references, bibliography, related work, literature reviews, state-of-the-art summaries, and introduction/background sections with references.\n"
 				"- Route image/FITS analysis tasks to suggested_worker='image'. This includes object/source classification, morphology analysis, segmentation, source detection, photometry, and visual/FITS inspection.\n"
-				"- Route catalog/database tasks to suggested_worker='catalog'. This includes catalog lookup, cross-matching, counterpart searches, coordinate/cone searches, source metadata retrieval, survey-table analysis, and CAESAR-backed queries.\n"
+				"- Route catalog/database tasks to suggested_worker='catalog'. This includes catalog lookup, cross-matching, counterpart searches, coordinate/cone searches, source metadata retrieval, and survey-table analysis.\n"
 				"- Route only non-specialist explanation, coding, workflow-design, and general reasoning tasks to suggested_worker='general'.\n"
 				"- If requires_planning=True and the task needs multiple specialist capabilities, set suggested_worker='step-dependent' and populate required_workers with the executable workers likely needed.\n"
 				"- required_workers must contain only executable workers: general, image, catalog, literature. Do not include 'step-dependent' in required_workers.\n\n"

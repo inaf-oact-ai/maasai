@@ -105,6 +105,11 @@ class CaesarRestClient:
 	) -> Any:
 		url = self._url(path)
 
+		logger.info(
+			f"--> CAESAR HTTP REQUEST: method={method.upper()}, url={url}, "
+			f"has_json={json_payload is not None}, has_files={files is not None}"
+		)
+
 		try:
 			response = requests.request(
 				method=method.upper(),
@@ -114,6 +119,12 @@ class CaesarRestClient:
 				files=files,
 				timeout=self.timeout_seconds,
 			)
+			
+			logger.info(
+				f"--> CAESAR HTTP RESPONSE: method={method.upper()}, url={url}, "
+				f"status_code={response.status_code}, content_type={response.headers.get('content-type', '')}"
+			)
+			
 			response.raise_for_status()
 
 			content_type = response.headers.get("content-type", "")
@@ -260,7 +271,40 @@ class CaesarRestClient:
 			files = {
 				"file": (file_path.name, handle),
 			}
-			return self._request("POST", "file", files=files)
+			return self._request("POST", "upload", files=files)
+
+	@staticmethod
+	def _extract_file_uid(result: Any) -> str | None:
+		uid_keys = {
+			"uuid",
+			"uid",
+			"file_uid",
+			"fileid",
+			"file_id",
+			"id",
+		}
+
+		def walk(value: Any) -> str | None:
+			if isinstance(value, dict):
+				for key in uid_keys:
+					item = value.get(key)
+					if item:
+						return str(item)
+
+				for item in value.values():
+					found = walk(item)
+					if found:
+						return found
+
+			if isinstance(value, list):
+				for item in value:
+					found = walk(item)
+					if found:
+						return found
+
+			return None
+
+		return walk(result)
 
 	@staticmethod
 	def _extract_job_id(result: dict[str, Any]) -> str | None:
@@ -501,6 +545,54 @@ class CaesarRestToolkit:
 		tool_name = f"caesar_run_{safe_app_name}"
 		description = self._build_dynamic_tool_description(app_name, app_spec)
 
+		def _normalize_data_inputs_for_caesar(
+			data_inputs: dict[str, Any],
+		) -> tuple[dict[str, Any], dict[str, Any] | None]:
+			"""Upload local absolute paths before submitting CAESAR jobs.
+
+			If the LLM passes {'data': '/local/file.fits', 'format': 'abspath'},
+			convert it to {'data': '<uploaded_uid>', 'format': 'uid'}.
+			"""
+			if not isinstance(data_inputs, dict):
+				return data_inputs, None
+
+			data = data_inputs.get("data")
+			fmt = data_inputs.get("format")
+
+			if isinstance(data, str) and fmt == "abspath":
+				path = Path(data)
+
+				if path.exists():
+					logger.info(
+						f"--> CAESAR PREUPLOAD: uploading local file before app submit: {path}"
+					)
+
+					upload_result = self.client.upload_file(str(path))
+			
+					logger.info(
+						f"--> CAESAR PREUPLOAD RESPONSE: {json.dumps(upload_result, indent=2, default=str)}"
+					)
+					
+					file_uid = self.client._extract_file_uid(upload_result)
+
+					if not file_uid:
+						raise RuntimeError(
+							"CAESAR upload succeeded but no file uid could be extracted "
+							f"from response: {upload_result!r}"
+						)
+
+					normalized = dict(data_inputs)
+					normalized["data"] = file_uid
+					normalized["format"] = "uid"
+
+					logger.info(
+						f"--> CAESAR PREUPLOAD DONE: path={path}, uid={file_uid}"
+					)
+
+					return normalized, upload_result
+
+			return data_inputs, None
+
 		def _run_caesar_app(
 			data_inputs: dict[str, Any],
 			job_options: dict[str, Any] | None = None,
@@ -509,23 +601,57 @@ class CaesarRestToolkit:
 			poll_seconds: float = 5.0,
 			timeout_seconds: float = 600.0,
 		) -> str:
+			
+			# - Normalize data inputs
+			data_inputs, upload_result = _normalize_data_inputs_for_caesar(data_inputs)
+			
+			# IMPORTANT:
+			# Agent-called CAESAR tools must not block the worker thread for long jobs.
+			# Submit the job and return the job_id. Polling/output retrieval should be
+			# handled by explicit follow-up workflow steps.		
+			if wait:
+				logger.warning(
+					f"CAESAR tool {app_name} was called with wait=True. "
+					"Overriding to wait=False to avoid blocking the worker graph."
+				)
+				wait = False
+		
+			logger.info(
+				f"--> CAESAR TOOL CALLED: app={app_name}, "
+				f"data_inputs={data_inputs}, "
+				f"job_options={job_options or {}}, "
+				f"tag={tag!r}, wait={wait}, "
+				f"poll_seconds={poll_seconds}, timeout_seconds={timeout_seconds}"
+			)
+			
 			result = self.client.submit_job(
 				app=app_name,
 				data_inputs=data_inputs,
 				job_options=job_options or {},
 				tag=tag,
 			)
+			
+			logger.info(
+				f"--> CAESAR TOOL SUBMIT RETURNED: app={app_name}, result={result}"
+			)
 
+			
 			if wait:
 				job_id = self.client._extract_job_id(result)
 				if not job_id:
 					return json.dumps(
 						{
+							"upload_result": upload_result,
 							"submit_result": result,
 							"wait_error": "Could not extract job_id from submit response.",
 						},
 						indent=2,
 					)
+
+				logger.info(
+					f"--> CAESAR TOOL WAITING: app={app_name}, job_id={job_id}, "
+					f"poll_seconds={poll_seconds}, timeout_seconds={timeout_seconds}"
+				)
 
 				status = self.client.wait_for_job(
 					job_id=job_id,
@@ -535,13 +661,29 @@ class CaesarRestToolkit:
 
 				return json.dumps(
 					{
+						"upload_result": upload_result,
 						"submit_result": result,
 						"final_status": status,
+						"message": (
+							"CAESAR job submitted asynchronously. "
+							"Use the returned job_id to check status and retrieve outputs."
+						),
 					},
 					indent=2,
 				)
 
-			return json.dumps(result, indent=2)
+			return json.dumps(
+				{
+					"upload_result": upload_result,
+					"submit_result": result,
+					"message": (
+						"CAESAR job submitted asynchronously. "
+						"Use the returned job_id to check status and retrieve outputs."
+					),
+				},
+				indent=2,
+			)
+		
 
 		return StructuredTool.from_function(
 			func=_run_caesar_app,
@@ -556,37 +698,14 @@ class CaesarRestToolkit:
 		app_spec: dict[str, Any],
 	) -> str:
 		
+		# - Top description
 		lines = [
 			f"Run the CAESAR REST application '{app_name}'.",
 			"",
 			"This tool submits a CAESAR REST job. The app name is implicit in this tool.",
-			"",
-			"Call arguments:",
-			"- data_inputs: CAESAR input data descriptor. It must usually contain:",
-			"  {'data': <input>, 'format': <format>}",
-			"  where format is one of:",
-			"  - 'uid': data is a file UID already registered in CAESAR, e.g. from upload API",
-			"  - 'abspath': data is an absolute path on the CAESAR storage filesystem",
-			"  - 'dataset': data is a dataset label supported by the CAESAR service",
-			"  For multiple inputs, use lists, e.g.:",
-			"  {'data': ['dataset_name', 'file_uid'], 'format': ['dataset', 'uid']}",
-			"- job_options: app-specific execution parameters.",
-			"  Place the listed CAESAR parameters inside job_options using their exact names.",
-			"  Boolean/flag parameters listed as type=none should be passed as true when enabled.",
-			"- tag: optional job label",
-			"- wait: if true, poll the submitted job until terminal status or timeout",
 		]
 		
-		lines.extend([
-			"",
-			"Example tool call arguments:",
-			"{",
-			"  'data_inputs': {'data': '<file_uid_or_path_or_dataset>', 'format': 'uid'},",
-			"  'job_options': {'score-thr': 0.5, 'save-plots': True},",
-			"  'wait': True",
-			"}",
-		])
-
+		# - Add detailed description
 		summary = self._extract_description_text(app_spec)
 		if summary:
 			lines.extend([
@@ -595,7 +714,56 @@ class CaesarRestToolkit:
 				summary,
 			])
 
-		param_text = self._format_app_parameters(app_spec)
+		
+		# - Add data inputs requirements
+		input_text = self._format_input_requirements(app_spec.get("input_requirements", {}))
+		if input_text:
+			lines.extend([
+				"",
+				"Input requirements:",
+				input_text,
+			])
+
+		# - Add tool call
+		lines.extend([
+			"",
+			"Call arguments:",
+			#"- data_inputs: CAESAR input data descriptor. It must usually contain:",
+			#"  {'data': <input>, 'format': <format>}",
+			#"  where format is one of:",
+			#"  - 'uid': data is a file UID already registered in CAESAR, e.g. from upload API",
+			#"  - 'abspath': data is an absolute path on the CAESAR storage filesystem",
+			#"  - 'dataset': data is a dataset label supported by the CAESAR service",
+			#"  For multiple inputs, use lists, e.g.:",
+			#"  {'data': ['dataset_name', 'file_uid'], 'format': ['dataset', 'uid']}",
+			"- data_inputs: CAESAR input data descriptor.",
+			"  Preferred format:",
+			"  {'data': '<file_uid>', 'format': 'uid'}",
+			"  If a local path is provided as {'data': '<local_path>', 'format': 'abspath'},",
+			"  this tool will upload the file to CAESAR REST first and replace the path",
+			"  with the returned file uid before submitting the job.",
+			"- job_options: app-specific execution parameters.",
+			"  Place the listed CAESAR parameters inside job_options using their exact names.",
+			"  Boolean/flag parameters listed as type=none should be passed as true when enabled.",
+			"- tag: optional job label",
+			"- wait: keep this false for normal agent workflows. Submit asynchronously and return the job_id. Do not set wait=true unless a caller explicitly requests blocking execution.",
+		])
+		
+		# - Add tool call example
+		lines.extend([
+			"",
+			"Example tool call arguments:",
+			"{",
+			"  'data_inputs': {'data': '<file_uid_or_path_or_dataset>', 'format': 'uid'},",
+			"  'job_options': {'model': 'yolov11l_imgsize640', 'imgsize': 640, 'preprocessing': True, 'normalize': True, 'normmin': 0.0, 'normmax': 255.0, 'zscale': True, 'zscale-contrasts': '0.25:0.25:0.25', 'score-thr': 0.5, 'iou-thr': 0.5, 'merge-overlap-iou-thr-soft': 0.3, 'merge-overlap-iou-thr-hard': 0.8, 'save-plots': True, 'draw-class-label-in-caption': True},",
+			"  'wait': False",
+			"}",
+		])
+		
+		# - Add job options
+		job_options_spec = self._extract_job_options_spec(app_spec)
+		param_text = self._format_app_parameters(job_options_spec)
+		
 		if param_text:
 			lines.extend([
 				"",
@@ -605,8 +773,27 @@ class CaesarRestToolkit:
 
 		lines.extend([
 			"",
-			"The tool returns the job submission response. If wait=true, it also polls the job status.",
+			#"The tool returns the job submission response. If wait=true, it also polls the job status.",
+			"The tool returns the job submission response. In normal agent workflows it submits asynchronously and returns a job_id; wait=true is ignored to avoid blocking execution."
 		])
+		
+		# - Add job output description
+		output_text = self._format_job_outputs(app_spec.get("job_outputs", {}))
+		if output_text:
+			lines.extend([
+			"",
+			"Expected output products:",
+			output_text,
+		])
+		
+		# - Add app limitations
+		limitations_text = self._format_limitations(app_spec.get("limitations", []))
+		if limitations_text:
+			lines.extend([
+				"",
+				"Limitations:",
+				limitations_text,
+			])
 
 		return "\n".join(lines)
 
@@ -723,6 +910,94 @@ class CaesarRestToolkit:
 				parts.append(CaesarRestToolkit._format_schema_fragment(value, indent="\t"))
 
 		return "\n".join(parts).strip()
+
+
+	@staticmethod
+	def _extract_job_options_spec(app_spec: dict[str, Any]) -> dict[str, Any]:
+		if isinstance(app_spec.get("job_options"), dict):
+			return app_spec["job_options"]
+
+		return app_spec
+
+	@staticmethod
+	def _format_job_outputs(job_outputs: Any) -> str:
+		if not isinstance(job_outputs, dict) or not job_outputs:
+			return ""
+
+		lines: list[str] = []
+
+		for name, spec in sorted(job_outputs.items()):
+			if not isinstance(spec, dict):
+				continue
+
+			role = spec.get("role", "")
+			parser = spec.get("parser", "")
+			type_name = spec.get("type", "")
+			path = spec.get("path") or spec.get("glob") or ""
+			required = spec.get("required", False)
+			description = spec.get("description", "")
+			notes = spec.get("notes", "")
+
+			bits = []
+			if role:
+				bits.append(f"role={role}")
+			if parser:
+				bits.append(f"parser={parser}")
+			if type_name:
+				bits.append(f"type={type_name}")
+			if path:
+				bits.append(f"path/glob={path}")
+			if required:
+				bits.append("required=true")
+
+			lines.append(f"- {name}: " + " | ".join(bits))
+
+			if description:
+				lines.append(f"  description: {description}")
+
+			if notes:
+				lines.append(f"  notes: {notes}")
+
+		return "\n".join(lines)
+
+
+	@staticmethod
+	def _format_input_requirements(input_requirements: Any) -> str:
+		if not isinstance(input_requirements, dict) or not input_requirements:
+			return ""
+
+		lines: list[str] = []
+
+		expected_data = input_requirements.get("expected_data")
+		if expected_data:
+			lines.append(f"- expected_data: {expected_data}")
+
+		supported_formats = input_requirements.get("supported_formats")
+		if supported_formats:
+			lines.append(f"- supported_formats: {supported_formats}")
+
+		notes = input_requirements.get("notes")
+		if isinstance(notes, list) and notes:
+			lines.append("- notes:")
+			for item in notes:
+				lines.append(f"  - {item}")
+		elif isinstance(notes, str) and notes:
+			lines.append(f"- notes: {notes}")
+
+		return "\n".join(lines)
+
+	@staticmethod
+	def _format_limitations(limitations: Any) -> str:
+		if not limitations:
+			return ""
+
+		if isinstance(limitations, list):
+			return "\n".join(f"- {item}" for item in limitations)
+
+		if isinstance(limitations, str):
+			return f"- {limitations}"
+
+		return json.dumps(limitations, indent=2, default=str)
 
 	@staticmethod
 	def _format_schema_fragment(value: Any, indent: str = "") -> str:
