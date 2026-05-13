@@ -31,6 +31,7 @@ class AgentFactory:
 		""" Create all agents """
 	
 		settings = settings or Settings()
+		self.tool_registry = tools
 	
 		# - Intake agent (accepting/rejecting user inputs)
 		self.intake_agent = create_agent(

@@ -36,6 +36,7 @@ class AstronomyToolRegistry:
 		caesar_timeout_seconds: float = 30.0,
 		caesar_cache_ttl_seconds: float = 86400.0,
 		caesar_auth_token: str | None = None,
+		caesar_enabled_apps: list[str] | None = None,
 	) -> None:
 		self.caesar: CaesarRestToolkit | None = None
 
@@ -57,6 +58,7 @@ class AstronomyToolRegistry:
 				cache=cache,
 				refresh_tools=caesar_refresh_tools,
 				enable_dynamic_app_tools=caesar_enable_dynamic_app_tools,
+				enabled_apps=caesar_enabled_apps,
 			)
 			
 		if self.caesar is not None:
@@ -108,12 +110,12 @@ class AstronomyToolRegistry:
 				print("========================\n")
 				break
 				
-		debug_app_name = "caesar-yolo"
-		if self.caesar is not None:
-			app_spec = self.caesar.app_specs.get(debug_app_name)
-			print(f"\n=== RAW CAESAR APP SPEC: {debug_app_name} ===")
-			print(json.dumps(app_spec, indent=2, default=str))
-			print("============================================\n")
+		#debug_app_name = "caesar-yolo"
+		#if self.caesar is not None:
+		#	app_spec = self.caesar.app_specs.get(debug_app_name)
+		#	print(f"\n=== RAW CAESAR APP SPEC: {debug_app_name} ===")
+		#	print(json.dumps(app_spec, indent=2, default=str))
+		#	print("============================================\n")
 
 		return tools
 

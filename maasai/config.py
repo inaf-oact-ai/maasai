@@ -31,16 +31,6 @@ def _env_list(name: str, default: str) -> list[str]:
 ###################################################
 ###     CONFIG CLASSES
 ###################################################
-#@dataclass(slots=True)
-#class LiteLLMProxySettings:
-#	base_url: str = field(default_factory=lambda: os.getenv("LITELLM_PROXY_BASE_URL", "http://localhost:4000"))
-#	api_key: str = field(default_factory=lambda: os.getenv("LITELLM_PROXY_API_KEY", "sk-local-dev"))
-#	timeout_seconds: float = field(default_factory=lambda: float(os.getenv("LITELLM_TIMEOUT_SECONDS", "180")))
-#	alias_small: str = field(default_factory=lambda: os.getenv("LITELLM_ALIAS_SMALL", "astro-small"))
-#	alias_medium: str = field(default_factory=lambda: os.getenv("LITELLM_ALIAS_MEDIUM", "astro-medium"))
-#	alias_large: str = field(default_factory=lambda: os.getenv("LITELLM_ALIAS_LARGE", "astro-large"))
-#	alias_multimodal: str = field(default_factory=lambda: os.getenv("LITELLM_ALIAS_MULTIMODAL", "astro-multimodal"))
-
 @dataclass(slots=True)
 class LiteLLMSettings:
 	"""LiteLLM runtime settings.
@@ -63,7 +53,16 @@ class LLMSettings:
 	"""Generic LLM call settings used by MAASAI nodes."""
 
 	timeout_seconds: float = field(
-		default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
+		default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+	)
+	tool_selection_timeout_seconds: float = field(
+		default_factory=lambda: float(os.getenv("LLM_TOOL_SELECTION_TIMEOUT_SECONDS", "60"))
+	)
+	worker_timeout_seconds: float = field(
+		default_factory=lambda: float(os.getenv("LLM_WORKER_TIMEOUT_SECONDS", "90"))
+	)
+	aggregator_timeout_seconds: float = field(
+		default_factory=lambda: float(os.getenv("LLM_AGGREGATOR_TIMEOUT_SECONDS", "60"))
 	)
 	intake_temperature: float = field(
 		default_factory=lambda: float(os.getenv("MAASAI_INTAKE_TEMPERATURE", "0.0"))
@@ -104,6 +103,9 @@ class WorkflowSettings:
 	pii_policy: str = field(
 		default_factory=lambda: os.getenv("MAASAI_PII_POLICY", "block")
 	)
+	external_job_poll_seconds: float = 10.0
+	external_job_timeout_seconds: float = 120.0
+	external_job_output_dir: str = "artifacts/external_jobs"
 
 @dataclass(slots=True)
 class RuntimeSettings:

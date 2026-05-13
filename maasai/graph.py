@@ -25,6 +25,7 @@ from .nodes import prepare_prompt
 from .nodes import planner_or_default
 from .nodes import execute_plan
 from .nodes import aggregate
+from .nodes import monitor_external_jobs
 from .rag import PromptRAG
 from .state import GraphState
 from .tools import AstronomyToolRegistry
@@ -40,30 +41,12 @@ def _after_intake(state: GraphState) -> str:
 	if decision and decision.accepted:
 		return "assess_prompt"
 	return "final_guardrail"
-
-#def _after_assessment(state: GraphState) -> str:
-#	assessment = state.get("prompt_assessment")
-#	if assessment and assessment.needs_rewrite:
-#		return "rewrite_prompt"
-#	return "final_guardrail"
 	
 def _after_assessment(state: GraphState) -> str:
 	assessment = state.get("prompt_assessment")
 	if assessment and assessment.needs_rewrite:
 		return "rewrite_prompt"
 	return "approval"	
-
-#def _after_approval(state: GraphState) -> str:
-#	decision = state.get("approval_decision")
-#	if decision is None:
-#		return "give_up"
-#	if decision.decision == "approve":
-#		return "prepare_prompt"
-#	if decision.decision == "revise":
-#		if state.get("approval_iterations", 0) >= state.get("max_approval_iterations", 3):
-#			return "give_up"
-#		return "refine_from_feedback"
-#	return "give_up"
 
 def _after_approval(state: GraphState) -> str:
 	decision = state.get("approval_decision")
@@ -83,6 +66,12 @@ def _after_approval(state: GraphState) -> str:
 		return "refine_from_feedback"
 
 	return "give_up"
+
+def _after_execute_plan(state: GraphState) -> str:
+	jobs = state.get("external_jobs", []) or []
+	if jobs:
+		return "monitor_external_jobs"
+	return "aggregate"
 
 ##################################################
 ###          GRAPH
@@ -119,6 +108,8 @@ def build_graph(
 	builder.add_node("execute_plan", partial(execute_plan, ctx=ctx))
 	builder.add_node("aggregate", partial(aggregate, ctx=ctx))
 	builder.add_node("final_guardrail", partial(final_guardrail, ctx=ctx))
+
+	builder.add_node("monitor_external_jobs", partial(monitor_external_jobs, ctx=ctx))
 
 	# - Connect nodes
 	
@@ -239,7 +230,12 @@ def build_graph(
 	})
 	builder.add_edge("prepare_prompt", "planner_or_default")
 	builder.add_edge("planner_or_default", "execute_plan")
-	builder.add_edge("execute_plan", "aggregate")
+	#builder.add_edge("execute_plan", "aggregate")
+	builder.add_conditional_edges("execute_plan", _after_execute_plan, {
+		"monitor_external_jobs": "monitor_external_jobs",
+		"aggregate": "aggregate",
+	})
+	builder.add_edge("monitor_external_jobs", "aggregate")
 	builder.add_edge("aggregate", "final_guardrail")
 	builder.add_edge("refine_from_feedback", "approval")
 	builder.add_edge("give_up", "final_guardrail")

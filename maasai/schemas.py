@@ -273,42 +273,25 @@ class StepResult(BaseModel):
 		default=None,
 		description="Error message if the step failed.",
 	)		
-			
-#class RAGDocument(BaseModel):
-#	doctype: str | None = None
-#	title: str | None = None
-#	text: str
-#	score: float | None = None
-#	source_id: str | None = None
-#	metadata: dict[str, Any] = Field(default_factory=dict)
 
+class ExternalJobHandle(BaseModel):
+	kind: str = Field(default="external_job")
+	backend: str
+	tool_name: str | None = None
+	app: str | None = None
+	job_id: str
+	state: str | None = None
+	requires_monitoring: bool = True
+	submit_result: dict[str, Any] | None = None
+	upload_result: dict[str, Any] | None = None
+	metadata: dict[str, Any] = Field(default_factory=dict)
 
-#class CaesarApp(BaseModel):
-#	name: str
-#	description: str | None = None
-#	raw: dict[str, Any] = Field(default_factory=dict)
-
-
-#class CaesarJobSubmission(BaseModel):
-#	app_name: str
-#	job_id: str | None = None
-#	payload: dict[str, Any] = Field(default_factory=dict)
-#	raw: dict[str, Any] = Field(default_factory=dict)
-
-
-#class CaesarJobStatus(BaseModel):
-#	job_id: str
-#	status: str
-#	terminal: bool = False
-#	raw: dict[str, Any] = Field(default_factory=dict)
-
-
-#class CaesarJobOutput(BaseModel):
-#	job_id: str
-#	content_type: str | None = None
-#	output_path: str | None = None
-#	data: Any = None
-#	metadata: dict[str, Any] = Field(default_factory=dict)
+class ExternalJobResult(BaseModel):
+	handle: ExternalJobHandle
+	status: str
+	final_status: dict[str, Any] | None = None
+	output: Any | None = None
+	error: str | None = None
 
 
 class FinalAnswer(BaseModel):

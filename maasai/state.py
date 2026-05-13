@@ -17,6 +17,8 @@ from .schemas import OptimizedPrompt
 from .schemas import ApprovalDecision
 from .schemas import TaskPlan
 from .schemas import StepResult
+from .schemas import ExternalJobHandle
+from .schemas import ExternalJobResult
 
 ##################################################
 ###          GRAPH STATE
@@ -56,6 +58,9 @@ class GraphState(TypedDict, total=False):
 	planner_rag_k: int
 	
 	execution_results: list[StepResult]
+	external_jobs: list[ExternalJobHandle]
+	external_job_results: list[ExternalJobResult]
+	
 	final_answer: FinalAnswer | None
 
 	route_reason: str
@@ -73,6 +78,9 @@ class GraphState(TypedDict, total=False):
 		"planned",
 		"rejected_after_iterations",
 		"rejected_by_user",
+		"execution_failed",
+		"executed",
+		"external_jobs_done",
 		"done",
 	]
 	

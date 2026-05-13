@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import time
 import re
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,18 +46,18 @@ class CaesarRunAppArgs(BaseModel):
 		default="",
 		description="Optional user-defined tag for the submitted CAESAR job.",
 	)
-	wait: bool = Field(
-		default=False,
-		description="If true, wait until the job reaches a terminal status.",
-	)
-	poll_seconds: float = Field(
-		default=5.0,
-		description="Polling interval used when wait=true.",
-	)
-	timeout_seconds: float = Field(
-		default=600.0,
-		description="Maximum waiting time used when wait=true.",
-	)
+	#wait: bool = Field(
+	#	default=False,
+	#	description="If true, wait until the job reaches a terminal status.",
+	#)
+	#poll_seconds: float = Field(
+	#	default=5.0,
+	#	description="Polling interval used when wait=true.",
+	#)
+	#timeout_seconds: float = Field(
+	#	default=600.0,
+	#	description="Maximum waiting time used when wait=true.",
+	#)
 
 
 class CaesarSubmitJobArgs(BaseModel):
@@ -63,9 +65,9 @@ class CaesarSubmitJobArgs(BaseModel):
 	data_inputs: dict[str, Any] = Field(..., description="CAESAR REST data_inputs object.")
 	job_options: dict[str, Any] = Field(default_factory=dict, description="CAESAR REST job_options object.")
 	tag: str = Field(default="", description="Optional job tag.")
-	wait: bool = Field(default=False, description="If true, wait for job completion.")
-	poll_seconds: float = Field(default=5.0, description="Polling interval when wait=true.")
-	timeout_seconds: float = Field(default=600.0, description="Timeout when wait=true.")
+	#wait: bool = Field(default=False, description="If true, wait for job completion.")
+	#poll_seconds: float = Field(default=5.0, description="Polling interval when wait=true.")
+	#timeout_seconds: float = Field(default=600.0, description="Timeout when wait=true.")
 
 
 ##################################################
@@ -214,14 +216,22 @@ class CaesarRestClient:
 	) -> dict[str, Any]:
 		start = time.monotonic()
 		terminal_statuses = {
+			"PENDING",
+			"RUNNING",
 			"SUCCESS",
-			"FAILED",
-			"CANCELLED",
-			"CANCELED",
-			"ERROR",
 			"DONE",
+			"COMPLETED",
+			"CANCELED",
+			"CANCELLED",
+			"FAILURE",
+			"FAILED",
+			"FAILURE",
+			"ERROR",
+			"TIMED-OUT",
+			"UNKNOWN",
+			"CLEARED",
 		}
-
+		
 		last_status: dict[str, Any] = {}
 
 		while True:
@@ -241,8 +251,92 @@ class CaesarRestClient:
 
 			time.sleep(max(float(poll_seconds), 0.5))
 
+	
 	def get_job_output(self, job_id: str) -> Any:
 		return self._request("GET", f"job/{job_id}/output")
+
+	
+	def get_job_output_file(
+		self,
+		job_id: str,
+		output_dir: str | Path,
+		filename: str | None = None,
+		app: str | None = None,
+		parse_archive: bool = True,
+		job_outputs_spec: dict[str, Any] | None = None,
+		primary_output_spec: dict[str, Any] | None = None,
+	) -> dict[str, Any]:
+		filename = filename or f"{job_id}_output.tar.gz"
+		output_path = Path(output_dir) / filename
+
+		download_info = self.download_job_output(
+			job_id=job_id,
+			output_path=output_path,
+		)
+
+		if not parse_archive:
+			return download_info
+
+		parsed_info = self.parse_job_output_archive(
+			output_path=output_path,
+			app=app,
+			job_outputs_spec=job_outputs_spec,
+			primary_output_spec=primary_output_spec,
+		)
+
+		return {
+			**download_info,
+			"app": app,
+			"job_outputs_spec": job_outputs_spec or {},
+			"primary_output_spec": primary_output_spec,
+			"parsed_output": parsed_info,
+		}
+
+	def download_job_output(
+		self,
+		job_id: str,
+		output_path: str | Path,
+	) -> dict[str, Any]:
+		output_path = Path(output_path)
+		output_path.parent.mkdir(parents=True, exist_ok=True)
+
+		url = self._url(f"job/{job_id}/output")
+
+		logger.info(
+			f"--> CAESAR HTTP DOWNLOAD: method=GET, url={url}, output_path={output_path}"
+		)
+
+		try:
+			with requests.get(
+				url=url,
+				headers=self._headers(),
+				timeout=self.timeout_seconds,
+				stream=True,
+			) as response:
+				logger.info(
+					f"--> CAESAR HTTP DOWNLOAD RESPONSE: url={url}, "
+					f"status_code={response.status_code}, "
+					f"content_type={response.headers.get('content-type', '')}"
+				)
+
+				response.raise_for_status()
+
+				with output_path.open("wb") as handle:
+					for chunk in response.iter_content(chunk_size=1024 * 1024):
+						if chunk:
+							handle.write(chunk)
+
+		except requests.RequestException as exc:
+			logger.exception("CAESAR REST output download failed")
+			raise RuntimeError(
+				f"CAESAR REST output download failed: GET {url}: {exc}"
+			) from exc
+
+		return {
+			"job_id": job_id,
+			"output_path": str(output_path),
+			"size_bytes": output_path.stat().st_size if output_path.exists() else None,
+		}
 
 	def cancel_job(self, job_id: str) -> dict[str, Any]:
 		result = self._request("POST", f"job/{job_id}/cancel")
@@ -272,6 +366,169 @@ class CaesarRestClient:
 				"file": (file_path.name, handle),
 			}
 			return self._request("POST", "upload", files=files)
+
+	def parse_job_output_archive(
+		self,
+		output_path: str | Path,
+		app: str | None = None,
+		job_outputs_spec: dict[str, Any] | None = None,
+		primary_output_spec: dict[str, Any] | None = None,
+	) -> dict[str, Any]:
+		output_path = Path(output_path)
+
+		if not output_path.exists():
+			raise FileNotFoundError(f"CAESAR output archive does not exist: {output_path}")
+
+		if not tarfile.is_tarfile(output_path):
+			return {
+				"output_path": str(output_path),
+				"parsed": False,
+				"error": "Downloaded output is not a valid tar archive.",
+			}
+
+		with tempfile.TemporaryDirectory(prefix="caesar_output_") as tmpdir:
+			tmpdir_path = Path(tmpdir)
+
+			with tarfile.open(output_path, "r:*") as tar:
+				self._safe_extract_tar(tar, tmpdir_path)
+
+			return self._parse_extracted_job_output(
+				extract_dir=tmpdir_path,
+				output_path=output_path,
+				app=app,
+				job_outputs_spec=job_outputs_spec,
+				primary_output_spec=primary_output_spec,
+			)
+
+	@staticmethod
+	def _safe_extract_tar(tar: tarfile.TarFile, dest_dir: Path) -> None:
+		dest_dir = dest_dir.resolve()
+
+		for member in tar.getmembers():
+			member_path = (dest_dir / member.name).resolve()
+
+			if not str(member_path).startswith(str(dest_dir)):
+				raise RuntimeError(
+					f"Unsafe path detected in CAESAR output archive: {member.name}"
+				)
+
+		tar.extractall(dest_dir)
+
+
+	def _parse_extracted_job_output(
+		self,
+		extract_dir: Path,
+		output_path: Path,
+		app: str | None = None,
+		job_outputs_spec: dict[str, Any] | None = None,
+		primary_output_spec: dict[str, Any] | None = None,
+	) -> dict[str, Any]:
+		files = [
+			path
+			for path in extract_dir.rglob("*")
+			if path.is_file()
+		]
+
+		primary_output_file = self._select_primary_output_file(
+			files=files,
+			primary_output_spec=primary_output_spec,
+			app=app,
+		)
+
+		primary_output = None
+
+		if primary_output_file is not None:
+			suffix = primary_output_file.suffix.lower()
+
+			if suffix == ".json":
+				with primary_output_file.open("r", encoding="utf-8") as handle:
+					primary_output = json.load(handle)
+			else:
+				primary_output = {
+					"path_in_archive": str(primary_output_file.relative_to(extract_dir)),
+					"note": "Primary output is not JSON; file was identified but not parsed inline.",
+				}
+
+		return {
+			"output_path": str(output_path),
+			"parsed": primary_output_file is not None,
+			"app": app,
+			"job_outputs_spec": job_outputs_spec or {},
+			"primary_output_spec": primary_output_spec,
+			"primary_output_path_in_archive": (
+				str(primary_output_file.relative_to(extract_dir))
+				if primary_output_file is not None
+				else None
+			),
+			"primary_output": primary_output,
+			"archive_files": [
+				str(path.relative_to(extract_dir))
+				for path in files
+			],
+		}
+
+	
+	@staticmethod
+	def _select_primary_output_file(
+		files: list[Path],
+		primary_output_spec: dict[str, Any] | None = None,
+		app: str | None = None,
+	) -> Path | None:
+		if not files:
+			return None
+
+		if primary_output_spec:
+			candidates = []
+
+			for key in ["path", "glob", "filename", "name"]:
+				value = primary_output_spec.get(key)
+				if isinstance(value, str) and value.strip():
+					candidates.append(value.strip())
+
+			for candidate in candidates:
+				candidate_l = candidate.lower()
+
+				for path in files:
+					rel = str(path).lower()
+					name = path.name.lower()
+
+					if candidate_l == name or candidate_l == rel:
+						return path
+
+				if "*" in candidate_l:
+					import fnmatch
+
+					for path in files:
+						if fnmatch.fnmatch(path.name.lower(), candidate_l):
+							return path
+						if fnmatch.fnmatch(str(path).lower(), candidate_l):
+							return path
+
+		json_files = [
+			path for path in files
+			if path.suffix.lower() == ".json"
+		]
+
+		if json_files:
+			preferred_names = [
+				"catalog.json",
+				"results.json",
+				"result.json",
+				"output.json",
+			]
+
+			by_name = {
+				path.name.lower(): path
+				for path in json_files
+			}
+
+			for name in preferred_names:
+				if name in by_name:
+					return by_name[name]
+	
+			return sorted(json_files, key=lambda path: str(path))[0]
+
+		return sorted(files, key=lambda path: str(path))[0]
 
 	@staticmethod
 	def _extract_file_uid(result: Any) -> str | None:
@@ -428,12 +685,26 @@ class CaesarRestToolkit:
 		cache: CaesarRestToolCache | None = None,
 		refresh_tools: bool = False,
 		enable_dynamic_app_tools: bool = True,
+		enabled_apps: list[str] | None = None,
 	) -> None:
 		self.client = client
 		self.cache = cache or CaesarRestToolCache()
 		self.enable_dynamic_app_tools = enable_dynamic_app_tools
+		self.enabled_apps = set(enabled_apps or [])
 
 		self.app_specs = self._load_or_discover(refresh_tools=refresh_tools)
+		
+		if self.enabled_apps:
+			self.app_specs = {
+				name: spec
+				for name, spec in self.app_specs.items()
+				if name in self.enabled_apps
+			}
+			logger.info(
+				f"Filtered CAESAR REST app specs to {len(self.app_specs)} enabled app(s): "
+				+ ", ".join(sorted(self.app_specs.keys()))
+			)
+		
 		self._tools = self._build_tools()
 
 	def _load_or_discover(self, refresh_tools: bool = False) -> dict[str, dict[str, Any]]:
@@ -458,65 +729,6 @@ class CaesarRestToolkit:
 		return list(self._tools)
 
 	def _build_tools(self) -> list[Any]:
-		#tools: list[Any] = [
-		#	StructuredTool.from_function(
-		#		func=self._caesar_list_apps,
-		#		name="caesar_list_apps",
-		#		description="List CAESAR REST applications discovered from the cached app registry.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_describe_app,
-		#		name="caesar_describe_app",
-		#		description="Return the CAESAR REST describe metadata for one application.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_submit_job,
-		#		name="caesar_submit_job",
-		#		description="Submit a generic CAESAR REST job by app name.",
-		#		args_schema=CaesarSubmitJobArgs,
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_get_job_status,
-		#		name="caesar_get_job_status",
-		#		description="Get the status of a CAESAR REST job.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_wait_for_job,
-		#		name="caesar_wait_for_job",
-		#		description="Poll a CAESAR REST job until it reaches a terminal state or timeout.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_get_job_output,
-		#		name="caesar_get_job_output",
-		#		description="Retrieve the output metadata or output payload for a completed CAESAR REST job.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_cancel_job,
-		#		name="caesar_cancel_job",
-		#		description="Cancel a CAESAR REST job.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_list_jobs,
-		#		name="caesar_list_jobs",
-		#		description="List CAESAR REST jobs visible to the service.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_list_file_ids,
-		#		name="caesar_list_file_ids",
-		#		description="List file ids known to CAESAR REST.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_list_datasets,
-		#		name="caesar_list_datasets",
-		#		description="List datasets known to CAESAR REST.",
-		#	),
-		#	StructuredTool.from_function(
-		#		func=self._caesar_upload_file,
-		#		name="caesar_upload_file",
-		#		description="Upload a local file to CAESAR REST and return the upload response.",
-		#	),
-		#]
-
 		tools: list[Any] = []
 		
 		if self.enable_dynamic_app_tools:
@@ -535,6 +747,29 @@ class CaesarRestToolkit:
 		)
 		
 		return tools
+
+	def _get_default_job_options(self, app_name: str) -> dict[str, Any]:
+		app_spec = self.app_specs.get(app_name, {})
+		job_options_spec = self._extract_job_options_spec(app_spec)
+
+		defaults = {}
+
+		if not isinstance(job_options_spec, dict):
+			return defaults
+
+		for name, spec in job_options_spec.items():
+			if not isinstance(spec, dict):
+				continue
+
+			default = spec.get("default")
+			mandatory = bool(spec.get("mandatory", False))
+
+			if default not in [None, ""]:
+				defaults[name] = default
+			elif mandatory and spec.get("type") == "none":
+				defaults[name] = True
+
+		return defaults
 
 	def _build_dynamic_app_tool(
 		self,
@@ -593,106 +828,87 @@ class CaesarRestToolkit:
 
 			return data_inputs, None
 
+
 		def _run_caesar_app(
 			data_inputs: dict[str, Any],
 			job_options: dict[str, Any] | None = None,
-			tag: str = "",
-			wait: bool = False,
-			poll_seconds: float = 5.0,
-			timeout_seconds: float = 600.0,
+			tag: str = ""
 		) -> str:
 			
 			# - Normalize data inputs
 			data_inputs, upload_result = _normalize_data_inputs_for_caesar(data_inputs)
 			
-			# IMPORTANT:
-			# Agent-called CAESAR tools must not block the worker thread for long jobs.
-			# Submit the job and return the job_id. Polling/output retrieval should be
-			# handled by explicit follow-up workflow steps.		
-			if wait:
-				logger.warning(
-					f"CAESAR tool {app_name} was called with wait=True. "
-					"Overriding to wait=False to avoid blocking the worker graph."
-				)
-				wait = False
-		
+			# - Set job options
+			job_options = {
+				**self._get_default_job_options(app_name),
+				**(job_options or {}),
+			}
+			
+			# - Submit job
 			logger.info(
 				f"--> CAESAR TOOL CALLED: app={app_name}, "
 				f"data_inputs={data_inputs}, "
 				f"job_options={job_options or {}}, "
-				f"tag={tag!r}, wait={wait}, "
-				f"poll_seconds={poll_seconds}, timeout_seconds={timeout_seconds}"
+				f"tag={tag!r}"
 			)
 			
 			result = self.client.submit_job(
 				app=app_name,
 				data_inputs=data_inputs,
-				job_options=job_options or {},
+				job_options=job_options,
 				tag=tag,
 			)
 			
-			logger.info(
-				f"--> CAESAR TOOL SUBMIT RETURNED: app={app_name}, result={result}"
-			)
-
+			# - Retrieve job id
+			job_id = self.client._extract_job_id(result)
 			
-			if wait:
-				job_id = self.client._extract_job_id(result)
-				if not job_id:
-					return json.dumps(
-						{
-							"upload_result": upload_result,
-							"submit_result": result,
-							"wait_error": "Could not extract job_id from submit response.",
-						},
-						indent=2,
-					)
-
-				logger.info(
-					f"--> CAESAR TOOL WAITING: app={app_name}, job_id={job_id}, "
-					f"poll_seconds={poll_seconds}, timeout_seconds={timeout_seconds}"
-				)
-
-				status = self.client.wait_for_job(
-					job_id=job_id,
-					poll_seconds=poll_seconds,
-					timeout_seconds=timeout_seconds,
-				)
-
+			logger.info(
+				f"--> CAESAR TOOL SUBMIT RETURNED: app={app_name}, result={result}, job_id={job_id}"
+			)
+			
+			if not job_id:
 				return json.dumps(
 					{
+						"kind": "external_job_error",
+						"backend": "caesar-rest",
+						"app": app_name,
+						"tool_name": tool_name,
 						"upload_result": upload_result,
 						"submit_result": result,
-						"final_status": status,
-						"message": (
-							"CAESAR job submitted asynchronously. "
-							"Use the returned job_id to check status and retrieve outputs."
-						),
+						"error": "Could not extract job_id from CAESAR submit response.",
 					},
 					indent=2,
 				)
 
 			return json.dumps(
 				{
+					"kind": "external_job",
+					"backend": "caesar-rest",
+					"app": app_name,
+					"tool_name": tool_name,
+					"job_id": job_id,
+					"state": result.get("state"),
+					"requires_monitoring": True,
 					"upload_result": upload_result,
 					"submit_result": result,
-					"message": (
-						"CAESAR job submitted asynchronously. "
-						"Use the returned job_id to check status and retrieve outputs."
-					),
+					"metadata": {
+						"tag": tag,
+						"data_inputs": data_inputs,
+						"job_options": job_options or {},
+					},
 				},
 				indent=2,
 			)
 		
-
 		return StructuredTool.from_function(
 			func=_run_caesar_app,
 			name=tool_name,
 			description=description,
 			args_schema=CaesarRunAppArgs,
+			return_direct=True,
 		)
 
-	def _build_dynamic_tool_description(
+	def _build_dynamic_tool_description_full(
 		self,
 		app_name: str,
 		app_spec: dict[str, Any],
@@ -714,7 +930,6 @@ class CaesarRestToolkit:
 				summary,
 			])
 
-		
 		# - Add data inputs requirements
 		input_text = self._format_input_requirements(app_spec.get("input_requirements", {}))
 		if input_text:
@@ -746,7 +961,7 @@ class CaesarRestToolkit:
 			"  Place the listed CAESAR parameters inside job_options using their exact names.",
 			"  Boolean/flag parameters listed as type=none should be passed as true when enabled.",
 			"- tag: optional job label",
-			"- wait: keep this false for normal agent workflows. Submit asynchronously and return the job_id. Do not set wait=true unless a caller explicitly requests blocking execution.",
+			#"- wait: keep this false for normal agent workflows. Submit asynchronously and return the job_id. Do not set wait=true unless a caller explicitly requests blocking execution.",
 		])
 		
 		# - Add tool call example
@@ -756,7 +971,7 @@ class CaesarRestToolkit:
 			"{",
 			"  'data_inputs': {'data': '<file_uid_or_path_or_dataset>', 'format': 'uid'},",
 			"  'job_options': {'model': 'yolov11l_imgsize640', 'imgsize': 640, 'preprocessing': True, 'normalize': True, 'normmin': 0.0, 'normmax': 255.0, 'zscale': True, 'zscale-contrasts': '0.25:0.25:0.25', 'score-thr': 0.5, 'iou-thr': 0.5, 'merge-overlap-iou-thr-soft': 0.3, 'merge-overlap-iou-thr-hard': 0.8, 'save-plots': True, 'draw-class-label-in-caption': True},",
-			"  'wait': False",
+			#"  'wait': False",
 			"}",
 		])
 		
@@ -773,8 +988,9 @@ class CaesarRestToolkit:
 
 		lines.extend([
 			"",
+			"The tool returns the job submission response, retrieve the job_id and returns it along with other job submission information."
 			#"The tool returns the job submission response. If wait=true, it also polls the job status.",
-			"The tool returns the job submission response. In normal agent workflows it submits asynchronously and returns a job_id; wait=true is ignored to avoid blocking execution."
+			#"The tool returns the job submission response. In normal agent workflows it submits asynchronously and returns a job_id; wait=true is ignored to avoid blocking execution."
 		])
 		
 		# - Add job output description
@@ -796,6 +1012,77 @@ class CaesarRestToolkit:
 			])
 
 		return "\n".join(lines)
+
+
+
+	def _build_dynamic_tool_description(
+		self,
+		app_name: str,
+		app_spec: dict[str, Any],
+	) -> str:
+		
+		lines = [
+			f"Submit a CAESAR REST external job for app '{app_name}'.",
+			"",
+			"This is a submit-only tool. It uploads local files when needed, submits the job,",
+			"and returns a normalized external_job handle with backend='caesar-rest' and job_id.",
+			"Do not wait for completion inside this tool; the graph monitors the job afterward.",
+			"",
+			"Required arguments:",
+			"- data_inputs: CAESAR input descriptor, preferably {'data': '<file_uid>', 'format': 'uid'}.",
+			"  If {'data': '<local_path>', 'format': 'abspath'} is provided, the tool uploads it first.",
+			"- job_options: dictionary of app-specific options. Use defaults unless the user request requires changes.",
+			"- tag: optional label.",
+		]
+
+		# - Add main description
+		summary = self._extract_description_text(app_spec)
+		if summary:
+			lines.extend([
+				"",
+				"App description:",
+				#summary[:1200],
+				summary,
+			])
+			
+		# - Add app limitations
+		limitations_text = self._format_limitations(app_spec.get("limitations", []))
+		if limitations_text:
+			lines.extend([
+				"",
+				"App limitations:",
+				limitations_text,
+			])
+
+		# - Add app input requirements
+		input_text = self._format_input_requirements(app_spec.get("input_requirements", {}))
+		if input_text:
+			lines.extend([
+				"",
+				"Input requirements:",
+				#input_text[:1200],
+				input_text,
+			])
+
+		# - Add app output description
+		output_text = self._format_job_outputs(app_spec.get("job_outputs", {}))
+		if output_text:
+			lines.extend([
+				"",
+				"Expected output products:",
+				#output_text[:1200],
+				output_text,
+			])
+
+		# - Add return values
+		lines.extend([
+			"",
+			"Return value:",
+			"A JSON object with kind='external_job', backend='caesar-rest', app, tool_name, job_id, state, submit_result, upload_result, and metadata.",
+		])
+
+		return "\n".join(lines)
+
 
 	@staticmethod
 	def _extract_description_text(app_spec: dict[str, Any]) -> str:
@@ -1060,10 +1347,11 @@ class CaesarRestToolkit:
 		job_options: dict[str, Any] | None = None,
 		tag: str = "",
 		wait: bool = False,
-		poll_seconds: float = 5.0,
+		poll_seconds: float = 10.0,
 		timeout_seconds: float = 600.0,
 	) -> str:
 		"""Submit a generic CAESAR REST job by app name."""
+		
 		result = self.client.submit_job(
 			app=app,
 			data_inputs=data_inputs,
@@ -1105,7 +1393,7 @@ class CaesarRestToolkit:
 	def _caesar_wait_for_job(
 		self,
 		job_id: str,
-		poll_seconds: float = 5.0,
+		poll_seconds: float = 10.0,
 		timeout_seconds: float = 600.0,
 	) -> str:
 		"""Poll a CAESAR REST job until it reaches a terminal state or timeout."""
@@ -1156,4 +1444,49 @@ class CaesarRestToolkit:
 		if isinstance(result, str):
 			return result
 		return json.dumps(result, indent=2)
+
+	def get_primary_output_spec(
+		self,
+		app: str,
+	) -> dict[str, Any] | None:
+		app_spec = self.app_specs.get(app, {})
+		job_outputs = app_spec.get("job_outputs", {})
+
+		if not isinstance(job_outputs, dict):
+			return None
+
+		for name, spec in job_outputs.items():
+			if isinstance(spec, dict) and spec.get("role") == "primary":
+				return {
+					"name": name,
+					**spec,
+				}
+
+		for name, spec in job_outputs.items():
+			if isinstance(spec, dict) and spec.get("required", False):
+				return {
+					"name": name,
+					**spec,
+				}
+
+		for name, spec in job_outputs.items():
+			if isinstance(spec, dict):
+				return {
+					"name": name,
+					**spec,
+				}
+
+		return None
+
+	def get_job_outputs_spec(
+		self,
+		app: str,
+	) -> dict[str, Any]:
+		app_spec = self.app_specs.get(app, {})
+		job_outputs = app_spec.get("job_outputs", {})
+
+		if isinstance(job_outputs, dict):
+			return job_outputs
+
+		return {}
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 ###          MODULE IMPORT
 ##################################################
 # - STANDARD MODULES
+import json
 import re
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -605,25 +606,6 @@ def _collect_citations_from_results(
 
 	return citations
 
-def _extract_agent_text_old(response: Any) -> str:
-	"""Extract the last text response from a LangChain/LangGraph agent response."""
-	if isinstance(response, dict):
-		messages = response.get("messages", [])
-		if messages:
-			last_message = messages[-1]
-			content = getattr(last_message, "content", last_message)
-			if isinstance(content, str):
-				return content
-			return str(content)
-
-		if "output" in response:
-			return str(response["output"])
-
-		if "structured_response" in response:
-			return str(response["structured_response"])
-
-	return str(response)
-
 
 def _extract_agent_text(response: Any) -> str:
 	"""Extract visible text from a LangChain/LangGraph agent response.
@@ -902,6 +884,33 @@ def _build_aggregation_prompt(
 				])
 
 
+	# - Add external job results
+	external_job_results = state.get("external_job_results", []) or []
+
+	if external_job_results:
+		lines.extend([
+			"",
+			"EXTERNAL JOB RESULTS:",
+		])
+
+		for idx, raw_result in enumerate(external_job_results, start=1):
+			item = raw_result.model_dump() if hasattr(raw_result, "model_dump") else raw_result
+			lines.extend([
+				f"- external_job_result: {idx}",
+				f"  backend: {item.get('handle', {}).get('backend')}",
+				f"  app: {item.get('handle', {}).get('app')}",
+				f"  job_id: {item.get('handle', {}).get('job_id')}",
+				f"  status: {item.get('status')}",
+				f"  error: {item.get('error')}",
+				f"  output: {json.dumps(item.get('output'), indent=2, default=str)}",
+			])
+	else:
+		lines.extend([
+			"",
+			"EXTERNAL JOB RESULTS: none",
+		])
+
+	# - Add citations
 	if citations:
 		lines.extend([
 			"",
@@ -935,6 +944,7 @@ def _build_aggregation_prompt(
 			"DEDUPLICATED CITATIONS: none",
 		])
 
+	# - Define aggregation instructions
 	lines.extend([
 		"",
 		"AGGREGATION INSTRUCTIONS:",
@@ -951,7 +961,10 @@ def _build_aggregation_prompt(
 		"- If DEDUPLICATED CITATIONS are provided, use only those citation indices for inline references.",
 		"- Do not create bibliography entries for evidence chunks or papers that are not listed in DEDUPLICATED CITATIONS.",
 		"- If multiple evidence chunks come from the same paper, cite the single deduplicated citation index.",
-		"- If a worker times out or fails before producing results, do not state that no data/results were found. State only that no valid result was produced."
+		"- If a worker times out or fails before producing results, do not state that no data/results were found. State only that no valid result was produced.",
+		"- If external job outputs are available, use them as the authoritative tool results.",
+		"- If an external job is pending, timed out, or failed, do not claim that no sources or detections exist; report that the job did not produce completed output.",
+		"- External job outputs may include parsed data products plus job_outputs_spec and primary_output_spec documentation. Use primary_output as the result data and use the specs to interpret product names, fields, roles, and meanings.",
 	])
 
 	return "\n".join(lines)
@@ -1177,6 +1190,160 @@ def _default_step_for_worker(worker: str) -> PlanStep:
 		expected_output="A complete response to the approved execution prompt.",
 	)
 
+
+def _extract_external_jobs_from_text(text: str) -> list[dict[str, Any]]:
+	if not text:
+		return []
+
+	jobs: list[dict[str, Any]] = []
+
+	decoder = json.JSONDecoder()
+	idx = 0
+
+	while idx < len(text):
+		try:
+			obj, end = decoder.raw_decode(text[idx:])
+		except json.JSONDecodeError:
+			idx += 1
+			continue
+
+		if isinstance(obj, dict):
+			if obj.get("kind") == "external_job":
+				jobs.append(obj)
+			else:
+				for value in obj.values():
+					if isinstance(value, dict) and value.get("kind") == "external_job":
+						jobs.append(value)
+
+		elif isinstance(obj, list):
+			for item in obj:
+				if isinstance(item, dict) and item.get("kind") == "external_job":
+					jobs.append(item)
+
+		idx += max(end, 1)
+
+	return jobs
+	
+def _monitor_caesar_rest_job(
+	job: dict[str, Any],
+	ctx: NodeContext,
+) -> dict[str, Any]:
+	job_id = job.get("job_id")
+
+	if not job_id:
+		return {
+			"handle": job,
+			"status": "error",
+			"final_status": None,
+			"output": None,
+			"error": "Missing job_id in CAESAR external job handle.",
+		}
+
+	tool_registry = getattr(ctx.agents, "tool_registry", None)
+	caesar = getattr(tool_registry, "caesar", None)
+
+	if caesar is None:
+		return {
+			"handle": job,
+			"status": "error",
+			"final_status": None,
+			"output": None,
+			"error": "CAESAR toolkit is not available in AgentFactory.tool_registry.",
+		}
+
+	client = caesar.client
+	
+	workflow_settings = getattr(ctx.settings, "workflow", None)
+	default_poll_seconds = getattr(workflow_settings, "external_job_poll_seconds", 10.0)
+	default_timeout_seconds = getattr(workflow_settings, "external_job_timeout_seconds", 120.0)
+	poll_seconds = float(job.get("metadata", {}).get("poll_seconds", default_poll_seconds))
+	timeout_seconds = float(job.get("metadata", {}).get("timeout_seconds", default_timeout_seconds))
+
+	logger.info(
+		f"--> monitor_external_jobs(): polling CAESAR job_id={job_id}, "
+		f"poll_seconds={poll_seconds}, timeout_seconds={timeout_seconds}"
+	)
+
+	# - Monitor periodically job status and retrieve it
+	final_status = client.wait_for_job(
+		job_id=job_id,
+		poll_seconds=poll_seconds,
+		timeout_seconds=timeout_seconds,
+	)
+
+	status_value = client._extract_status_value(final_status)
+	status_upper = status_value.upper() if status_value else ""
+	output = None
+
+	# - Retrieve job outputs in case of success
+	if status_upper in {"SUCCESS", "DONE"}:
+		logger.info(
+			f"--> monitor_external_jobs(): CAESAR job_id={job_id} completed, retrieving output"
+		)
+		# - Retrieve job output spec
+		job_outputs_spec = {}
+		primary_output_spec = None
+		if caesar is not None and job.get("app"):
+			job_outputs_spec = caesar.get_job_outputs_spec(job.get("app"))
+			primary_output_spec = caesar.get_primary_output_spec(job.get("app"))	
+			
+		# - Retrieve job outputs	
+		output_dir = getattr(
+			workflow_settings,
+			"external_job_output_dir",
+			"artifacts/external_jobs",
+		)
+		output = client.get_job_output_file(
+			job_id=job_id,
+			output_dir=output_dir,
+			filename=f"jobout_{job_id}.tar.gz",
+			app=job.get("app"),
+			parse_archive=True,
+			job_outputs_spec=job_outputs_spec,
+			primary_output_spec=primary_output_spec,
+		)
+
+	return {
+		"handle": job,
+		"status": status_value or "UNKNOWN",
+		"final_status": final_status,
+		"output": output,
+		"error": None if status_upper in {"SUCCESS", "DONE"} else f"CAESAR job did not complete successfully: {status_value}",
+	}
+	
+def monitor_external_jobs(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
+	jobs = state.get("external_jobs", []) or []
+
+	if not jobs:
+		return {
+			"external_job_results": [],
+			"status": "external_jobs_done",
+		}
+
+	results = []
+
+	for raw_job in jobs:
+		job = raw_job.model_dump() if hasattr(raw_job, "model_dump") else dict(raw_job)
+		backend = job.get("backend")
+
+		if backend == "caesar-rest":
+			result = _monitor_caesar_rest_job(job, ctx)
+		else:
+			result = {
+				"handle": job,
+				"status": "unsupported_backend",
+				"final_status": None,
+				"output": None,
+				"error": f"No external job monitor registered for backend={backend!r}.",
+			}
+
+		results.append(result)
+
+	return {
+		"external_job_results": results,
+		"status": "external_jobs_done",
+	}	
+	
 ##################################################
 ###          GRAPH NODES
 ##################################################
@@ -1735,6 +1902,7 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	}
 
 	results: list[StepResult] = []
+	external_jobs = list(state.get("external_jobs", []) or [])
 
 	for step in plan.steps:
 		agent = worker_map.get(step.worker)
@@ -1812,18 +1980,25 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 				"--> execute_plan(): image worker should have CAESAR tools available via AgentFactory worker_tools."
 			)
 
+		# - Execute prompt
 		try:
-			#response = agent.invoke({
-			#	"messages": [HumanMessage(content=worker_prompt)]
-			#})
-			timeout_s = ctx.settings.llm.timeout_seconds
+			timeout_s = getattr(ctx.settings.llm, "worker_timeout_seconds", ctx.settings.llm.timeout_seconds)
 			response = _invoke_with_timeout(
 				agent,
 				{"messages": [HumanMessage(content=worker_prompt)]},
 				timeout_s=timeout_s,
 			)
 
+			# - Extract agent response
 			output = _extract_agent_text(response)
+			
+			# - Retrieve external job responses
+			new_external_jobs = _extract_external_jobs_from_text(output)
+			if new_external_jobs:
+				logger.info(
+					f"--> execute_plan(): extracted {len(new_external_jobs)} external job handle(s)"
+				)
+				external_jobs.extend(new_external_jobs)
 			
 			logger.info(
 				f"--> execute_plan(): completed {step.id} [{step.worker}], "
@@ -1852,7 +2027,7 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 					status="failed",
 					output="",
 					evidence=worker_rag_context,
-					error=f"{step.worker}_agent timed out after {ctx.settings.llm.timeout_seconds} seconds.",
+					error=f"{step.worker}_agent timed out after {timeout_s} seconds.",
 				)
 			)
 	
@@ -1873,6 +2048,7 @@ def execute_plan(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 
 	return {
 		"execution_results": results,
+		"external_jobs": external_jobs,
 		"status": "executed",
 	}
 
@@ -1925,9 +2101,12 @@ def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 	logger.info("--> aggregate(): invoking aggregator_agent ...")
 
 	try:
-		response = ctx.agents.aggregator_agent.invoke({
-			"messages": [HumanMessage(content=aggregation_prompt)]
-		})
+		timeout_s = getattr(ctx.settings.llm, "aggregator_timeout_seconds", ctx.settings.llm.timeout_seconds)
+		response = _invoke_with_timeout(
+			ctx.agents.aggregator_agent,
+			{"messages": [HumanMessage(content=aggregation_prompt)]},
+			timeout_s=timeout_s,
+		)
 		final_text = _extract_agent_text(response)
 		final_text = _strip_references_section(final_text)
 		final_text = _normalize_inline_citations(final_text)
@@ -1960,6 +2139,8 @@ def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 			],
 			"caveats": caveats,
 			"planner_rag_context": state.get("planner_rag_context", []),
+			"external_jobs": state.get("external_jobs", []),
+			"external_job_results": state.get("external_job_results", []),
 		},
 	)
 
