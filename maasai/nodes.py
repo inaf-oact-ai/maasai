@@ -691,11 +691,13 @@ def _build_worker_prompt(
 	worker_rag_context: list[dict[str, Any]] | None = None,
 ) -> str:
 	"""Build a worker-specific execution prompt for one plan step."""
+	
 	execution_prompt = state.get("execution_prompt", "")
 	prepared_assets = state.get("prepared_assets", [])
 	planner_rag_context = state.get("planner_rag_context", []) or []
 	worker_rag_context = worker_rag_context or []
 
+	# - Define main task objective
 	lines = [
 		"TASK OBJECTIVE:",
 		plan.objective,
@@ -712,6 +714,7 @@ def _build_worker_prompt(
 		f"- expected_output: {step.expected_output}",
 	]
 
+	# - Add data assets
 	if prepared_assets:
 		lines.extend([
 			"",
@@ -730,6 +733,7 @@ def _build_worker_prompt(
 			"AVAILABLE ATTACHMENTS: none",
 		])
 
+	# - Add previous step results
 	if previous_results:
 		lines.extend([
 			"",
@@ -746,6 +750,7 @@ def _build_worker_prompt(
 			"PREVIOUS STEP RESULTS: none",
 		])
 
+	# - Add RAG retrieved context from planner agent
 	if planner_rag_context:
 		lines.extend([
 			"",
@@ -766,8 +771,7 @@ def _build_worker_prompt(
 			"PLANNER RAG CONTEXT: none",
 		])
 
-
-
+	# - Add RAG retrieved context from literature worker agent
 	if worker_rag_context:
 		lines.extend([
 			"",
@@ -821,11 +825,14 @@ def _build_worker_prompt(
 				"LITERATURE RAG CONTEXT: none",
 			])
 
+	# - Add execution instructions
 	lines.extend([
 		"",
 		"EXECUTION INSTRUCTIONS:",
 		"- Execute only the current plan step.",
 		"- Use available tools if they are needed and available.",
+		"- If no suitable tool/app/retrieval source exists, you may still provide a best-effort model-only result.",
+		"- Any model-only result must explicitly say that it is based only on the model's pretrained/multimodal capabilities and not on external tool/app/retrieval output.",
 		"- Do not fabricate observations, catalog values, measurements, citations, or tool outputs.",
 		"- Do not include a separate References or Bibliography section in the answer body unless explicitly requested; structured citations are attached separately.",
 		"- If the step cannot be completed, explain why and what information/tool is missing.",
@@ -965,6 +972,8 @@ def _build_aggregation_prompt(
 		"- If external job outputs are available, use them as the authoritative tool results.",
 		"- If an external job is pending, timed out, or failed, do not claim that no sources or detections exist; report that the job did not produce completed output.",
 		"- External job outputs may include parsed data products plus job_outputs_spec and primary_output_spec documentation. Use primary_output as the result data and use the specs to interpret product names, fields, roles, and meanings.",
+		"- If the user requested a specific output format such as JSON, prioritize that format and avoid adding extra sections unless needed for caveats.",
+		"- If a worker produced a result without using a suitable external tool/app/retrieval source, include a clear caveat that the output is model-only and is not grounded in external tool, application, catalog, or retrieval results, unless the user explicitly asked to provide a synthetic/formatted response and nothing else.",
 	])
 
 	return "\n".join(lines)
@@ -1272,26 +1281,44 @@ def _monitor_caesar_rest_job(
 	)
 
 	status_value = client._extract_status_value(final_status)
-	status_upper = status_value.upper() if status_value else ""
+	status_upper = status_value.upper() if status_value else "UNKNOWN"
+	
+	success_states = {
+		"SUCCESS",
+		"DONE",
+		"COMPLETED",
+	}
+
+	failure_states = {
+		"FAILURE",
+		"FAILED",
+		"ERROR",
+		"TIMED-OUT",
+		"TIMEOUT",
+		"CANCELED",
+		"CANCELLED",
+		"CLEARED",
+		"UNKNOWN",
+	}
+
 	output = None
+	job_outputs_spec = {}
+	primary_output_spec = None
+	
+	if caesar is not None and job.get("app"):
+		job_outputs_spec = caesar.get_job_outputs_spec(job.get("app"))
+		primary_output_spec = caesar.get_primary_output_spec(job.get("app"))
+	
+	output_dir = getattr(
+		workflow_settings,
+		"external_job_output_dir",
+		"artifacts/external_jobs",
+	)
 
 	# - Retrieve job outputs in case of success
-	if status_upper in {"SUCCESS", "DONE"}:
+	if status_upper in success_states:
 		logger.info(
 			f"--> monitor_external_jobs(): CAESAR job_id={job_id} completed, retrieving output"
-		)
-		# - Retrieve job output spec
-		job_outputs_spec = {}
-		primary_output_spec = None
-		if caesar is not None and job.get("app"):
-			job_outputs_spec = caesar.get_job_outputs_spec(job.get("app"))
-			primary_output_spec = caesar.get_primary_output_spec(job.get("app"))	
-			
-		# - Retrieve job outputs	
-		output_dir = getattr(
-			workflow_settings,
-			"external_job_output_dir",
-			"artifacts/external_jobs",
 		)
 		output = client.get_job_output_file(
 			job_id=job_id,
@@ -1302,13 +1329,21 @@ def _monitor_caesar_rest_job(
 			job_outputs_spec=job_outputs_spec,
 			primary_output_spec=primary_output_spec,
 		)
+	elif status_upper in failure_states:
+		logger.warning(
+			f"--> monitor_external_jobs(): CAESAR job_id={job_id} ended with status={status_upper}"
+		)	
 
 	return {
 		"handle": job,
 		"status": status_value or "UNKNOWN",
 		"final_status": final_status,
 		"output": output,
-		"error": None if status_upper in {"SUCCESS", "DONE"} else f"CAESAR job did not complete successfully: {status_value}",
+		"error": (
+			None
+			if status_upper in success_states
+			else f"CAESAR job did not complete successfully: {status_value}"
+		),
 	}
 	
 def monitor_external_jobs(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
@@ -2086,6 +2121,19 @@ def aggregate(state: GraphState, ctx: NodeContext) -> dict[str, Any]:
 		for item in results
 		if item.status != "ok"
 	]
+	
+	# - Add external job failures to caveat
+	external_job_results = state.get("external_job_results", []) or []
+	for item in external_job_results:
+		status = str(item.get("status", "")).upper()
+		error = item.get("error")
+
+		if status not in {"SUCCESS", "DONE", "COMPLETED"}:
+			caveats.append(
+				f"External job {item.get('handle', {}).get('job_id')} "
+				f"[{item.get('handle', {}).get('backend')}/{item.get('handle', {}).get('app')}] "
+				f"did not complete successfully: {error or status}"
+			)
 
 	# - Fill citations
 	citations = _collect_citations_from_results(results)

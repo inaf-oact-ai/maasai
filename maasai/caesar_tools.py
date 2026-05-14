@@ -214,36 +214,59 @@ class CaesarRestClient:
 		poll_seconds: float = 5.0,
 		timeout_seconds: float = 600.0,
 	) -> dict[str, Any]:
+	
 		start = time.monotonic()
-		terminal_statuses = {
-			"PENDING",
-			"RUNNING",
+		
+		success_statuses = {
 			"SUCCESS",
 			"DONE",
 			"COMPLETED",
-			"CANCELED",
-			"CANCELLED",
+		}
+		failure_statuses = {
 			"FAILURE",
 			"FAILED",
-			"FAILURE",
 			"ERROR",
 			"TIMED-OUT",
-			"UNKNOWN",
+			"TIMEOUT",
+			"CANCELED",
+			"CANCELLED",
 			"CLEARED",
+			"UNKNOWN",
 		}
+		running_statuses = {
+			"PENDING",
+			"RUNNING",
+		}
+		terminal_statuses = success_statuses | failure_statuses
 		
 		last_status: dict[str, Any] = {}
 
 		while True:
 			last_status = self.get_job_status(job_id)
 			status_value = self._extract_status_value(last_status)
+			status_upper = status_value.upper() if status_value else "UNKNOWN"
 
-			if status_value and status_value.upper() in terminal_statuses:
-				return last_status
+			if status_upper in terminal_statuses:
+				return {
+					**last_status,
+					"monitor_status": status_upper,
+					"monitor_terminal": True,
+					"monitor_success": status_upper in success_statuses,
+				}
+
+			if status_upper not in running_statuses:
+				logger.warning(
+					f"CAESAR job {job_id} returned unrecognized non-terminal status: "
+					f"{status_value!r}; continuing to poll until timeout."
+				)
 
 			if time.monotonic() - start > timeout_seconds:
 				return {
-					"status": "TIMEOUT",
+					"state": "TIMED-OUT",
+					"status": "Timed out while monitoring CAESAR job.",
+					"monitor_status": "TIMED-OUT",
+					"monitor_terminal": True,
+					"monitor_success": False,
 					"job_id": job_id,
 					"last_status": last_status,
 					"message": f"Timed out after {timeout_seconds} seconds.",
@@ -581,14 +604,14 @@ class CaesarRestClient:
 
 	@staticmethod
 	def _extract_status_value(result: dict[str, Any]) -> str | None:
-		for key in ["status", "state", "job_status"]:
+		for key in ["state", "job_status", "status"]:
 			value = result.get(key)
 			if value:
 				return str(value)
 
 		job = result.get("job")
 		if isinstance(job, dict):
-			for key in ["status", "state", "job_status"]:
+			for key in ["state", "job_status", "status"]:
 				value = job.get(key)
 				if value:
 					return str(value)
